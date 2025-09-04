@@ -28,15 +28,10 @@ app.use(express.json());
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-
-  if (token == null) {
-    return res.status(401).json({ error: 'Token requerido.' });
-  }
+  if (token == null) return res.status(401).json({ error: 'Token requerido.' });
 
   jwt.verify(token, jwtSecret, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Token no es válido o ha expirado.' });
-    }
+    if (err) return res.status(403).json({ error: 'Token no es válido o ha expirado.' });
     req.user = user;
     next();
   });
@@ -115,17 +110,20 @@ app.post('/login', async (req, res) => {
 // --- 5. ENDPOINTS PROTEGIDOS (Datos del Usuario) ---
 // =================================================================
 
-// --- ENDPOINT PARA VER EL EQUIPO ---
+// --- ENDPOINT PARA VER EL ÁRBOL/EQUIPO (VERSIÓN MEJORADA) ---
 app.get('/me/tree', authenticateToken, async (req, res) => {
   const userId = req.user.userId;
   try {
-    const { data: referrals, error } = await supabase
-      .from('users')
-      .select('id, username, email, status, level')
-      .eq('referred_by_id', userId);
+    // LLAMAMOS A LA FUNCIÓN 'get_user_tree' QUE CREAMOS EN LA BASE DE DATOS
+    const { data, error } = await supabase.rpc('get_user_tree', {
+      p_user_id: userId
+    });
 
     if (error) { throw error; }
-    res.status(200).json({ message: 'Datos del equipo obtenidos con éxito', team: referrals });
+
+    // El resultado es un array de objetos JSON con toda la descendencia del usuario.
+    res.status(200).json({ message: 'Árbol del usuario obtenido con éxito', tree: data });
+
   } catch (error) {
     res.status(500).json({ error: 'Error interno del servidor: ' + error.message });
   }
