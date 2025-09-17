@@ -12,19 +12,20 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- CONFIGURACIÓN DE BILLETERAS Y REDES ---
 const TRON_TREASURY_ADDRESS = 'TB3idCQ8aojaeMx9kdudp6vgN3TWJFdrTW';
-const BSC_TREASURY_ADDRESS = '0xa92dD1DdE84Ec6Ea88733dd290F40186bbb1dD74'; // Asegúrate que esta sea tu dirección de prueba de BSC
-const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY; 
+const BSC_TREASURY_ADDRESS = '0xa92dD1DdE84Ec6Ea88733dd290F40186bbb1dD74';
+const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 
-// Configuración para TRON (Nile Testnet)
+// Dirección del contrato de USDT en la Nile Testnet de TRON
+const TRON_USDT_CONTRACT_ADDRESS = 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkM3Uo';
+
+// Configuración para TRON
 const tronWeb = new TronWeb({ fullHost: 'https://api.nile.trongrid.io' });
-
-// Configuración para BSC (Testnet)
-const bscProvider = new ethers.JsonRpcProvider('https://data-seed-prebsc-1-s1.binance.org:8545/');
 
 console.log('Listener de pagos multi-cadena configurado.');
 
 /**
- * Busca y procesa pagos pendientes en la red de TRON.
+ * --- FUNCIÓN CORREGIDA ---
+ * Busca y procesa pagos pendientes en la red de TRON usando la API de TronGrid.
  */
 async function checkTronPayments() {
     try {
@@ -36,18 +37,21 @@ async function checkTronPayments() {
         if (error) throw error;
         if (!pendingOrders || pendingOrders.length === 0) return;
 
-        const transactions = await tronWeb.getTransactionsToAddress(TRON_TREASURY_ADDRESS, 30, 0);
+        // Hacemos una llamada fetch directa a la API de TronGrid para obtener las transacciones de tokens TRC20
+        const apiUrl = `https://nile.trongrid.io/v1/accounts/${TRON_TREASURY_ADDRESS}/transactions/trc20?limit=30&contract_address=${TRON_USDT_CONTRACT_ADDRESS}`;
+        const response = await fetch(apiUrl);
+        const data = await response.json();
 
-        for (const tx of transactions) {
-            if (tx.raw_data.contract[0].type === 'TriggerSmartContract') {
-                const contractData = tx.raw_data.contract[0].parameter.value;
-                const amount_paid = parseInt(contractData.data.substring(72), 16) / 1_000_000;
+        if (data.success && data.data.length > 0) {
+            for (const tx of data.data) {
+                // USDT en TRON tiene 6 decimales
+                const amount_paid = parseInt(tx.value) / 1_000_000;
 
                 const matchingOrder = pendingOrders.find(order => Math.abs(order.amount - amount_paid) < 0.00001);
 
                 if (matchingOrder) {
                     console.log(`[TRON] Coincidencia encontrada! Monto: ${amount_paid}, Usuario ID: ${matchingOrder.user_id}`);
-                    await activateUser(matchingOrder.user_id, tx.txID);
+                    await activateUser(matchingOrder.user_id, tx.transaction_id);
                 }
             }
         }
@@ -76,7 +80,6 @@ async function checkBscPayments() {
         if (data.status === "1" && data.result.length > 0) {
             for (const tx of data.result) {
                 const amount_paid = parseFloat(ethers.formatUnits(tx.value, 18));
-                
                 const matchingOrder = pendingOrders.find(order => Math.abs(order.amount - amount_paid) < 0.00001);
 
                 if (matchingOrder) {
@@ -94,25 +97,14 @@ async function checkBscPayments() {
  * Función centralizada para activar un usuario y actualizar su orden.
  */
 async function activateUser(userId, transactionHash) {
-    // Activamos al usuario
-    const { error: updateUserError } = await supabase
-        .from('users')
-        .update({ status: 'activo' })
-        .eq('id', userId);
-    
+    const { error: updateUserError } = await supabase.from('users').update({ status: 'activo' }).eq('id', userId);
     if (updateUserError) throw updateUserError;
 
-    // Y actualizamos la orden a 'completed' y guardamos el hash de la transacción
-    const { error: updateOrderError } = await supabase
-        .from('payment_orders')
-        .update({ status: 'completed', transaction_hash: transactionHash })
-        .eq('user_id', userId);
-    
+    const { error: updateOrderError } = await supabase.from('payment_orders').update({ status: 'completed', transaction_hash: transactionHash }).eq('user_id', userId);
     if (updateOrderError) throw updateOrderError;
 
     console.log(`Usuario con ID ${userId} ha sido activado. Hash: ${transactionHash}`);
 }
-
 
 /**
  * Función para iniciar el listener y hacer que se ejecute periódicamente.
