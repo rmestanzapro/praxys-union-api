@@ -15,35 +15,42 @@ const TRON_TREASURY_ADDRESS = 'TB3idCQ8aojaeMx9kdudp6vgN3TWJFdrTW';
 const BSC_TREASURY_ADDRESS = '0xa92dD1DdE84Ec6Ea88733dd290F40186bbb1dD74';
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 
-// Dirección del contrato de USDT en la Nile Testnet de TRON
 const TRON_USDT_CONTRACT_ADDRESS = 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkM3Uo';
+
+const tronWeb = new TronWeb({ fullHost: 'https://api.nile.trongrid.io' });
 
 console.log('Listener de pagos multi-cadena configurado.');
 
-/**
- * --- FUNCIÓN CORREGIDA ---
- * Busca y procesa pagos pendientes en la red de TRON usando la API de TronGrid.
- */
 async function checkTronPayments() {
+    console.log('[TRON] Iniciando ciclo de chequeo...');
     try {
         const { data: pendingOrders, error } = await supabase
             .from('payment_orders')
             .select('user_id, amount')
             .eq('status', 'pending');
 
-        if (error) throw error;
-        if (!pendingOrders || pendingOrders.length === 0) return;
+        if (error) {
+            console.error('[TRON] Error al obtener órdenes pendientes:', error.message);
+            throw error;
+        }
+        
+        if (!pendingOrders || pendingOrders.length === 0) {
+            console.log('[TRON] No se encontraron órdenes pendientes.');
+            return;
+        }
+        console.log(`[TRON] Encontradas ${pendingOrders.length} órdenes pendientes.`);
 
-        // Hacemos una llamada fetch directa a la API de TronGrid para obtener las transacciones de tokens TRC20
         const apiUrl = `https://nile.trongrid.io/v1/accounts/${TRON_TREASURY_ADDRESS}/transactions/trc20?limit=30&contract_address=${TRON_USDT_CONTRACT_ADDRESS}`;
         const response = await fetch(apiUrl);
+        if (!response.ok) {
+            console.error(`[TRON] Error de API TronGrid: ${response.statusText}`);
+            return;
+        }
         const data = await response.json();
 
         if (data.success && data.data.length > 0) {
             for (const tx of data.data) {
-                // USDT en TRON tiene 6 decimales
                 const amount_paid = parseInt(tx.value) / 1_000_000;
-
                 const matchingOrder = pendingOrders.find(order => Math.abs(order.amount - amount_paid) < 0.00001);
 
                 if (matchingOrder) {
@@ -53,25 +60,35 @@ async function checkTronPayments() {
             }
         }
     } catch (error) {
-        console.error('Error en el listener de TRON:', error.message);
+        console.error('Error mayor en el listener de TRON:', error.message);
     }
 }
 
-/**
- * Busca y procesa pagos pendientes en la red de BSC.
- */
 async function checkBscPayments() {
+    console.log('[BSC] Iniciando ciclo de chequeo...');
     try {
         const { data: pendingOrders, error } = await supabase
             .from('payment_orders')
             .select('user_id, amount')
             .eq('status', 'pending');
 
-        if (error) throw error;
-        if (!pendingOrders || pendingOrders.length === 0) return;
+        if (error) {
+            console.error('[BSC] Error al obtener órdenes pendientes:', error.message);
+            throw error;
+        }
+
+        if (!pendingOrders || pendingOrders.length === 0) {
+            console.log('[BSC] No se encontraron órdenes pendientes.');
+            return;
+        }
+        console.log(`[BSC] Encontradas ${pendingOrders.length} órdenes pendientes.`);
 
         const apiUrl = `https://api-testnet.bscscan.com/api?module=account&action=tokentx&address=${BSC_TREASURY_ADDRESS}&startblock=0&endblock=99999999&sort=desc&apikey=${ETHERSCAN_API_KEY}`;
         const response = await fetch(apiUrl);
+        if (!response.ok) {
+            console.error(`[BSC] Error de API BscScan: ${response.statusText}`);
+            return;
+        }
         const data = await response.json();
 
         if (data.status === "1" && data.result.length > 0) {
@@ -86,14 +103,12 @@ async function checkBscPayments() {
             }
         }
     } catch (error) {
-        console.error('Error en el listener de BSC:', error.message);
+        console.error('Error mayor en el listener de BSC:', error.message);
     }
 }
 
-/**
- * Función centralizada para activar un usuario y actualizar su orden.
- */
 async function activateUser(userId, transactionHash) {
+    console.log(`Intentando activar usuario ${userId}...`);
     const { error: updateUserError } = await supabase.from('users').update({ status: 'activo' }).eq('id', userId);
     if (updateUserError) throw updateUserError;
 
@@ -103,18 +118,27 @@ async function activateUser(userId, transactionHash) {
     console.log(`Usuario con ID ${userId} ha sido activado. Hash: ${transactionHash}`);
 }
 
-/**
- * Función para iniciar el listener y hacer que se ejecute periódicamente.
- */
-function startListener() {
-    const checkInterval = 15000; // 15 segundos
-    console.log(`Iniciando listeners. Se ejecutarán cada ${checkInterval / 1000} segundos.`);
-    
-    checkTronPayments();
-    checkBscPayments();
-    
-    setInterval(checkTronPayments, checkInterval);
-    setInterval(checkBscPayments, checkInterval);
+async function startListener() {
+    console.log('Iniciando ciclo del listener...');
+    const checkInterval = 15000;
+
+    const runChecks = async () => {
+        console.log("--- Nuevo ciclo de búsqueda de pagos ---");
+        await Promise.all([
+            checkTronPayments(),
+            checkBscPayments()
+        ]).catch(err => {
+            console.error("Error crítico durante la ejecución paralela de los listeners:", err);
+        });
+    };
+
+    try {
+        await runChecks(); // Ejecutamos una vez al inicio
+        setInterval(runChecks, checkInterval); // Configuramos el intervalo
+        console.log(`Listeners configurados para ejecutarse cada ${checkInterval / 1000} segundos.`);
+    } catch (initialRunError) {
+        console.error("Error fatal durante el primer arranque del listener:", initialRunError);
+    }
 }
 
 module.exports = { startListener };
