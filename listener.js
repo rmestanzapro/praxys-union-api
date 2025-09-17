@@ -11,7 +11,7 @@ const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- CONFIGURACIÓN ---
-const TRON_TREASURY_ADDRESS = 'TEoscc63B9U96qN5cXWkaGqNBYJZhLQdJV';
+const TRON_TREASURY_ADDRESS = 'TB3idCQ8aojaeMx9kdudp6vgN3TWJFdrTW';
 const BSC_TREASURY_ADDRESS = '0xa92dD1DdE84Ec6Ea88733dd290F40186bbb1dD74';
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 const TRON_USDT_CONTRACT_ADDRESS = 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkM3Uo';
