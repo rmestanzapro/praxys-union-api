@@ -14,15 +14,14 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const TRON_TREASURY_ADDRESS = 'TB3idCQ8aojaeMx9kdudp6vgN3TWJFdrTW';
 const BSC_TREASURY_ADDRESS = '0xa92dD1DdE84Ec6Ea88733dd290F40186bbb1dD74';
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
-const TRON_USDT_CONTRACT_ADDRESS = 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkM3Uo';
 
 console.log('Listener de pagos multi-cadena configurado.');
 
 /**
- * Busca y procesa pagos pendientes en la red de TRON usando la API de TronScan con fallback a TronGrid.
+ * Busca y procesa pagos pendientes en la red de TRON consultando todas las transacciones.
  */
 async function checkTronPayments() {
-    console.log('[TRON] Iniciando ciclo de chequeo...');
+    console.log('[TRON] Iniciando ciclo de chequeo (método robusto)...');
     try {
         const { data: pendingOrders, error } = await supabase.from('payment_orders').select('user_id, amount').eq('status', 'pending');
 
@@ -31,55 +30,35 @@ async function checkTronPayments() {
             console.log('[TRON] No se encontraron órdenes pendientes.');
             return;
         }
-        console.log(`[TRON] Encontradas ${pendingOrders.length} órdenes pendientes.`);
 
-        // Usar TronScan API como alternativa más confiable
-        const apiUrl = `https://nileapi.tronscan.org/api/token_trc20/transfers?limit=50&start=0&sort=-timestamp&count=true&filterTokenValue=0&relatedAddress=${TRON_TREASURY_ADDRESS}`;
-        console.log(`[TRON] Consultando TronScan API: ${apiUrl}`);
-        
+        const apiUrl = `https://api.nile.trongrid.io/v1/accounts/${TRON_TREASURY_ADDRESS}/transactions?limit=50&only_to=true`;
         const response = await fetch(apiUrl);
-        if (!response.ok) {
-            throw new Error(`Error de API TronScan: ${response.status} - ${response.statusText}`);
-        }
+        if (!response.ok) throw new Error(`Error de API TronGrid: ${response.statusText}`);
         
         const data = await response.json();
 
-        if (data.token_transfers && data.token_transfers.length > 0) {
-            for (const transfer of data.token_transfers) {
-                // Verificar que sea USDT y que sea hacia nuestra dirección
-                if (transfer.contractAddress === TRON_USDT_CONTRACT_ADDRESS && 
-                    transfer.to_address === TRON_TREASURY_ADDRESS) {
-                    
-                    const amount_paid = parseFloat(transfer.quant) / Math.pow(10, transfer.tokenInfo.tokenDecimal);
-                    
-                    // Buscar orden coincidente
-                    const matchingOrder = pendingOrders.find(order => Math.abs(order.amount - amount_paid) < 0.00001);
+        if (data.success && data.data.length > 0) {
+            for (const tx of data.data) {
+                // Buscamos solo transacciones que invocan un contrato inteligente
+                if (tx.raw_data.contract[0].type === 'TriggerSmartContract') {
+                    const contractData = tx.raw_data.contract[0].parameter.value;
+                    // El método para transferir tokens siempre empieza con 'a9059cbb'
+                    if (contractData.data && contractData.data.startsWith('a9059cbb')) {
+                        // Decodificamos el monto manualmente. USDT tiene 6 decimales.
+                        const amount_paid = parseInt(contractData.data.substring(72), 16) / 1_000_000;
 
-                    if (matchingOrder) {
-                        console.log(`[TRON] Coincidencia encontrada! Monto: ${amount_paid}, Usuario ID: ${matchingOrder.user_id}`);
-                        await activateUser(matchingOrder.user_id, transfer.transaction_id);
+                        const matchingOrder = pendingOrders.find(order => Math.abs(order.amount - amount_paid) < 0.00001);
+
+                        if (matchingOrder) {
+                            console.log(`[TRON] Coincidencia encontrada! Monto: ${amount_paid}, Usuario ID: ${matchingOrder.user_id}`);
+                            await activateUser(matchingOrder.user_id, tx.txID);
+                        }
                     }
                 }
             }
-        } else {
-            console.log('[TRON] No se encontraron transacciones TRC20 recientes.');
         }
     } catch (error) {
         console.error('Error en el listener de TRON:', error.message);
-        
-        // Si TronScan falla, intentar con TronGrid básico
-        try {
-            console.log('[TRON] Intentando con TronGrid básico...');
-            const fallbackUrl = `https://nile.trongrid.io/v1/accounts/${TRON_TREASURY_ADDRESS}/transactions?limit=20`;
-            const fallbackResponse = await fetch(fallbackUrl);
-            
-            if (fallbackResponse.ok) {
-                const fallbackData = await fallbackResponse.json();
-                console.log('[TRON] Conexión con TronGrid básico exitosa');
-            }
-        } catch (fallbackError) {
-            console.error('[TRON] Error también en TronGrid básico:', fallbackError.message);
-        }
     }
 }
 
@@ -95,7 +74,6 @@ async function checkBscPayments() {
             console.log('[BSC] No se encontraron órdenes pendientes.');
             return;
         }
-        console.log(`[BSC] Encontradas ${pendingOrders.length} órdenes pendientes.`);
         
         const apiUrl = `https://api-testnet.bscscan.com/api?module=account&action=tokentx&address=${BSC_TREASURY_ADDRESS}&startblock=0&endblock=99999999&sort=desc&apikey=${ETHERSCAN_API_KEY}`;
         const response = await fetch(apiUrl);
