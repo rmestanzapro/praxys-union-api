@@ -18,9 +18,6 @@ const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 // Dirección del contrato de USDT en la Nile Testnet de TRON
 const TRON_USDT_CONTRACT_ADDRESS = 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkM3Uo';
 
-// Configuración para TRON
-const tronWeb = new TronWeb({ fullHost: 'https://api.nile.trongrid.io' });
-
 console.log('Listener de pagos multi-cadena configurado.');
 
 /**
