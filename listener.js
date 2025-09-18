@@ -18,11 +18,29 @@ const TRONGRID_API_KEY = process.env.TRONGRID_API_KEY;
 
 console.log('Listener de pagos multi-cadena configurado.');
 
+// --- VERIFICACIÓN DE VARIABLES DE ENTORNO AL ARRANCAR ---
+if (!TRONGRID_API_KEY) {
+    console.error('ERROR FATAL: La variable de entorno TRONGRID_API_KEY no está definida o no se ha cargado.');
+} else {
+    console.log('[TRON] TRONGRID_API_KEY cargada exitosamente.');
+}
+if (!ETHERSCAN_API_KEY) {
+    console.error('ERROR FATAL: La variable de entorno ETHERSCAN_API_KEY no está definida o no se ha cargado.');
+} else {
+    console.log('[BSC] ETHERSCAN_API_KEY cargada exitosamente.');
+}
+
 /**
  * Busca y procesa pagos pendientes en la red de TRON.
  */
 async function checkTronPayments() {
     console.log('[TRON] Iniciando ciclo de chequeo...');
+    
+    if (!TRONGRID_API_KEY) {
+        console.error('[TRON] Error: TRONGRID_API_KEY no está disponible. Saltando chequeo de TRON.');
+        return;
+    }
+    
     try {
         const { data: pendingOrders, error } = await supabase.from('payment_orders').select('user_id, amount').eq('status', 'pending');
         if (error) throw error;
@@ -46,16 +64,13 @@ async function checkTronPayments() {
 
         if (data.success && data.data.length > 0) {
             for (const tx of data.data) {
-                if (tx.raw_data.contract[0].type === 'TriggerSmartContract') {
-                    const contractData = tx.raw_data.contract[0].parameter.value;
-                    if (contractData.data && contractData.data.startsWith('a9059cbb')) {
-                        const amount_paid = parseInt(contractData.data.substring(72), 16) / 1_000_000;
-                        const matchingOrder = pendingOrders.find(order => Math.abs(order.amount - amount_paid) < 0.00001);
+                if (tx.raw_data.contract[0].type === 'TriggerSmartContract' && tx.raw_data.contract[0].parameter.value.data.startsWith('a9059cbb')) {
+                    const amount_paid = parseInt(tx.raw_data.contract[0].parameter.value.data.substring(72), 16) / 1_000_000;
+                    const matchingOrder = pendingOrders.find(order => Math.abs(order.amount - amount_paid) < 0.00001);
 
-                        if (matchingOrder) {
-                            console.log(`[TRON] Coincidencia encontrada! Monto: ${amount_paid}, Usuario ID: ${matchingOrder.user_id}`);
-                            await activateUser(matchingOrder.user_id, tx.txID);
-                        }
+                    if (matchingOrder) {
+                        console.log(`[TRON] Coincidencia encontrada! Monto: ${amount_paid}, Usuario ID: ${matchingOrder.user_id}`);
+                        await activateUser(matchingOrder.user_id, tx.txID);
                     }
                 }
             }
@@ -70,6 +85,12 @@ async function checkTronPayments() {
  */
 async function checkBscPayments() {
     console.log('[BSC] Iniciando ciclo de chequeo...');
+
+    if (!ETHERSCAN_API_KEY) {
+        console.error('[BSC] Error: ETHERSCAN_API_KEY no está disponible. Saltando chequeo de BSC.');
+        return;
+    }
+
     try {
         const { data: pendingOrders, error } = await supabase.from('payment_orders').select('user_id, amount').eq('status', 'pending');
         if (error) throw error;
@@ -103,19 +124,17 @@ async function checkBscPayments() {
  */
 async function activateUser(userId, transactionHash) {
     console.log(`Intentando activar usuario ${userId}...`);
-    const { error: updateUserError } = await supabase.from('users').update({ status: 'activo' }).eq('id', userId);
-    if (updateUserError) {
-        console.error(`Error al activar usuario ${userId}:`, updateUserError);
-        throw updateUserError;
-    }
+    try {
+        const { error: updateUserError } = await supabase.from('users').update({ status: 'activo' }).eq('id', userId);
+        if (updateUserError) throw updateUserError;
 
-    const { error: updateOrderError } = await supabase.from('payment_orders').update({ status: 'completed', transaction_hash: transactionHash }).eq('user_id', userId);
-    if (updateOrderError) {
-        console.error(`Error al actualizar orden para usuario ${userId}:`, updateOrderError);
-        throw updateOrderError;
-    }
+        const { error: updateOrderError } = await supabase.from('payment_orders').update({ status: 'completed', transaction_hash: transactionHash }).eq('user_id', userId);
+        if (updateOrderError) throw updateOrderError;
 
-    console.log(`Usuario con ID ${userId} ha sido activado. Hash: ${transactionHash}`);
+        console.log(`Usuario con ID ${userId} ha sido activado. Hash: ${transactionHash}`);
+    } catch (error) {
+        console.error(`Error crítico al activar al usuario ${userId}:`, error.message);
+    }
 }
 
 /**
@@ -133,7 +152,7 @@ function startListener() {
     };
 
     try {
-        setTimeout(runChecks, 3000); // Un pequeño delay inicial para que el servidor se estabilice
+        setTimeout(runChecks, 3000); // Un pequeño delay inicial
         setInterval(runChecks, checkInterval);
         console.log(`Listeners configurados para ejecutarse cada ${checkInterval / 1000} segundos.`);
     } catch (initialRunError) {
