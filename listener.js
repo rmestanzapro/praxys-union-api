@@ -14,17 +14,17 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const TRON_TREASURY_ADDRESS = 'TB3idCQ8aojaeMx9kdudp6vgN3TWJFdrTW';
 const BSC_TREASURY_ADDRESS = '0xa92dD1DdE84Ec6Ea88733dd290F40186bbb1dD74';
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
+const TRONGRID_API_KEY = process.env.TRONGRID_API_KEY;
 
 console.log('Listener de pagos multi-cadena configurado.');
 
 /**
- * Busca y procesa pagos pendientes en la red de TRON consultando todas las transacciones.
+ * Busca y procesa pagos pendientes en la red de TRON.
  */
 async function checkTronPayments() {
-    console.log('[TRON] Iniciando ciclo de chequeo (método robusto)...');
+    console.log('[TRON] Iniciando ciclo de chequeo...');
     try {
         const { data: pendingOrders, error } = await supabase.from('payment_orders').select('user_id, amount').eq('status', 'pending');
-
         if (error) throw error;
         if (!pendingOrders || pendingOrders.length === 0) {
             console.log('[TRON] No se encontraron órdenes pendientes.');
@@ -32,21 +32,24 @@ async function checkTronPayments() {
         }
 
         const apiUrl = `https://api.nile.trongrid.io/v1/accounts/${TRON_TREASURY_ADDRESS}/transactions?limit=50&only_to=true`;
-        const response = await fetch(apiUrl);
-        if (!response.ok) throw new Error(`Error de API TronGrid: ${response.statusText}`);
         
+        const response = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'TRON-PRO-API-KEY': TRONGRID_API_KEY
+            }
+        });
+
+        if (!response.ok) throw new Error(`Error de API TronGrid: ${response.statusText}`);
         const data = await response.json();
 
         if (data.success && data.data.length > 0) {
             for (const tx of data.data) {
-                // Buscamos solo transacciones que invocan un contrato inteligente
                 if (tx.raw_data.contract[0].type === 'TriggerSmartContract') {
                     const contractData = tx.raw_data.contract[0].parameter.value;
-                    // El método para transferir tokens siempre empieza con 'a9059cbb'
                     if (contractData.data && contractData.data.startsWith('a9059cbb')) {
-                        // Decodificamos el monto manualmente. USDT tiene 6 decimales.
                         const amount_paid = parseInt(contractData.data.substring(72), 16) / 1_000_000;
-
                         const matchingOrder = pendingOrders.find(order => Math.abs(order.amount - amount_paid) < 0.00001);
 
                         if (matchingOrder) {
@@ -101,10 +104,16 @@ async function checkBscPayments() {
 async function activateUser(userId, transactionHash) {
     console.log(`Intentando activar usuario ${userId}...`);
     const { error: updateUserError } = await supabase.from('users').update({ status: 'activo' }).eq('id', userId);
-    if (updateUserError) throw updateUserError;
+    if (updateUserError) {
+        console.error(`Error al activar usuario ${userId}:`, updateUserError);
+        throw updateUserError;
+    }
 
     const { error: updateOrderError } = await supabase.from('payment_orders').update({ status: 'completed', transaction_hash: transactionHash }).eq('user_id', userId);
-    if (updateOrderError) throw updateOrderError;
+    if (updateOrderError) {
+        console.error(`Error al actualizar orden para usuario ${userId}:`, updateOrderError);
+        throw updateOrderError;
+    }
 
     console.log(`Usuario con ID ${userId} ha sido activado. Hash: ${transactionHash}`);
 }
@@ -124,11 +133,11 @@ function startListener() {
     };
 
     try {
-        setTimeout(runChecks, 3000);
+        setTimeout(runChecks, 3000); // Un pequeño delay inicial para que el servidor se estabilice
         setInterval(runChecks, checkInterval);
         console.log(`Listeners configurados para ejecutarse cada ${checkInterval / 1000} segundos.`);
     } catch (initialRunError) {
-        console.error("Fatal error during listener startup:", initialRunError);
+        console.error("Error fatal durante el arranque del listener:", initialRunError);
     }
 }
 
