@@ -29,12 +29,10 @@ const processedHashes = new Set();
 
 // Configuración flexible para testing
 const CONFIG = {
-    // Usar la misma variable de entorno que el frontend
-    TESTING_MODE: process.env.REACT_APP_TESTING_MODE === "true",
-    // Usar el mismo monto mínimo que el frontend
-    MIN_AMOUNT: 1, // Monto mínimo en testing (1 USDT)
-    TOLERANCE: 0.01, // Tolerancia en comparación de montos
-    POLL_INTERVAL: process.env.REACT_APP_TESTING_MODE === "true" ? 5000 : 10000, // 5s en testing, 10s en producción
+    TESTING_MODE: process.env.TESTING_MODE === "true",
+    MIN_AMOUNT: 1,
+    TOLERANCE: 0.01,
+    POLL_INTERVAL: process.env.TESTING_MODE === "true" ? 5000 : 10000,
     API_TIMEOUT: 15000
 };
 
