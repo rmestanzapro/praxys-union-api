@@ -1,4 +1,5 @@
-// listener.js - Versión simplificada para Testnet
+// listener.js - PRODUCCIÓN MAINNET
+// Configurado para recibir pagos en las direcciones reales
 
 const { ethers } = require('ethers');
 const { createClient } = require('@supabase/supabase-js');
@@ -9,327 +10,378 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// --- CONFIGURACIÓN ---
-const TRON_TREASURY_ADDRESS = 'TB3idCQ8aojaeMx9kdudp6vgN3TWJFdrTW';
-const BSC_TREASURY_ADDRESS = '0xa92dD1DdE84Ec6Ea88733dd290F40186bbb1dD74';
+// --- CONFIGURACIÓN PRODUCCIÓN ---
+const TRON_TREASURY_ADDRESS = 'TQPF5KMutqorntfMmEVSknrvDRaPudxCdfrW';
+const BSC_TREASURY_ADDRESS = '0x731A28a2FfDC9399h2d59420B665Ae3f3644DE78';
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
+const TRONGRID_API_KEY = process.env.TRONGRID_API_KEY;
 
-console.log('Listener simplificado para Testnet iniciado');
+// Contratos mainnet
+const TRON_USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'; // USDT Mainnet
+const BSC_USDT_CONTRACT = '0x55d398326f99059ff775485246999027b3197955'; // USDT BSC Mainnet
+
+console.log('🚀 LISTENER PRODUCCIÓN - MAINNET INICIADO');
+console.log(`📍 TRON Treasury: ${TRON_TREASURY_ADDRESS}`);
+console.log(`📍 BSC Treasury: ${BSC_TREASURY_ADDRESS}`);
 
 // Cache de transacciones procesadas
 const processedHashes = new Set();
 
+// Configuración flexible para testing
+const CONFIG = {
+    // Usar la misma variable de entorno que el frontend
+    TESTING_MODE: process.env.REACT_APP_TESTING_MODE === "true",
+    // Usar el mismo monto mínimo que el frontend
+    MIN_AMOUNT: 1, // Monto mínimo en testing (1 USDT)
+    TOLERANCE: 0.01, // Tolerancia en comparación de montos
+    POLL_INTERVAL: process.env.REACT_APP_TESTING_MODE === "true" ? 5000 : 10000, // 5s en testing, 10s en producción
+    API_TIMEOUT: 15000
+};
+
+// Agregar log inicial de modo
+console.log(`🔧 Modo: ${CONFIG.TESTING_MODE ? '🧪 TESTING' : '🚀 PRODUCCIÓN'}`);
+console.log(`💰 Monto mínimo testing: ${CONFIG.MIN_AMOUNT} USDT`);
+
 /**
- * FUNCIÓN SIMPLIFICADA PARA TRON - Solo usa una API que funcione
+ * TRON MAINNET - Sistema robusto con múltiples APIs
  */
 async function checkTronPayments() {
-    console.log('[TRON] Iniciando chequeo...');
+    console.log(`[TRON] 🔍 Verificando pagos ${CONFIG.TESTING_MODE ? '(Testing)' : '(Producción)'}...`);
     
     try {
-        // Verificar órdenes pendientes
         const { data: pendingOrders, error } = await supabase
             .from('payment_orders')
-            .select('user_id, amount, created_at')
+            .select('user_id, amount, created_at, id')
             .eq('status', 'pending');
 
         if (error) throw error;
-        if (!pendingOrders || pendingOrders.length === 0) {
-            console.log('[TRON] No hay órdenes pendientes.');
+        if (!pendingOrders?.length) {
+            console.log('[TRON] ⚪ Sin órdenes pendientes');
             return;
         }
 
-        console.log(`[TRON] Órdenes pendientes: ${pendingOrders.length}`);
-        pendingOrders.forEach(order => {
-            console.log(`   Usuario ${order.user_id}: ${order.amount} USDT`);
-        });
+        // Filtrar órdenes según modo testing
+        const validOrders = CONFIG.TESTING_MODE 
+            ? pendingOrders.filter(order => Math.abs(order.amount - CONFIG.MIN_AMOUNT) < CONFIG.TOLERANCE)
+            : pendingOrders;
 
-        // USAR SOLO UNA API QUE FUNCIONE - TronScan básico
-        const apiUrl = `https://nileapi.tronscan.org/api/account?address=${TRON_TREASURY_ADDRESS}`;
-        console.log('[TRON] Consultando TronScan básico...');
-        
-        const response = await fetch(apiUrl, {
-            method: 'GET',
-            headers: {
-                'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0'
+        if (CONFIG.TESTING_MODE) {
+            console.log(`[TRON] 🧪 Modo testing - Buscando pagos de ${CONFIG.MIN_AMOUNT} USDT`);
+        }
+
+        if (validOrders.length === 0) {
+            console.log(`[TRON] ⚠️ No hay órdenes >= ${CONFIG.MIN_AMOUNT} USDT`);
+            return;
+        }
+
+        // APIs de mainnet en orden de prioridad
+        const apis = [
+            {
+                name: 'TronScan Mainnet',
+                url: `https://apilist.tronscan.org/api/token_trc20/transfers?limit=50&start=0&sort=-timestamp&toAddress=${TRON_TREASURY_ADDRESS}&filterTokenValue=0`,
+                parser: parseTronScanResponse
             },
-            timeout: 10000
-        });
+            {
+                name: 'TronScan Alt',
+                url: `https://api.tronscan.org/api/token_trc20/transfers?limit=50&relatedAddress=${TRON_TREASURY_ADDRESS}&filterTokenValue=0`,
+                parser: parseTronScanResponse
+            },
+            {
+                name: 'TronGrid Mainnet',
+                url: `https://api.trongrid.io/v1/accounts/${TRON_TREASURY_ADDRESS}/transactions/trc20?limit=50&only_to=true`,
+                parser: parseTronGridResponse
+            }
+        ];
 
-        if (response.ok) {
-            console.log('[TRON] TronScan respondió correctamente');
-            
-            // Ahora intentar obtener transacciones TRC20
-            const txUrl = `https://nileapi.tronscan.org/api/token_trc20/transfers?limit=20&start=0&toAddress=${TRON_TREASURY_ADDRESS}`;
-            
-            const txResponse = await fetch(txUrl, {
-                method: 'GET',
-                headers: {
-                    'Accept': 'application/json',
-                    'User-Agent': 'Mozilla/5.0'
-                },
-                timeout: 10000
-            });
-
-            if (txResponse.ok) {
-                const txData = await txResponse.json();
-                console.log(`[TRON] Respuesta de transacciones recibida`);
+        for (const api of apis) {
+            try {
+                console.log(`[TRON] 🌐 ${api.name}...`);
                 
-                if (txData.token_transfers && txData.token_transfers.length > 0) {
-                    console.log(`[TRON] Encontradas ${txData.token_transfers.length} transacciones`);
+                const response = await fetch(api.url, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                        'User-Agent': 'PaymentListener/1.0',
+                        ...(TRONGRID_API_KEY && { 'TRON-PRO-API-KEY': TRONGRID_API_KEY })
+                    },
+                    timeout: CONFIG.API_TIMEOUT
+                });
+
+                if (!response.ok) {
+                    console.log(`[TRON] ❌ ${api.name}: ${response.status}`);
+                    continue;
+                }
+
+                const data = await response.json();
+                const transactions = api.parser(data);
+                
+                if (transactions.length > 0) {
+                    console.log(`[TRON] ✅ ${api.name}: ${transactions.length} transacciones`);
                     
-                    for (const tx of txData.token_transfers) {
-                        // Verificar que no hayamos procesado esta transacción
-                        if (processedHashes.has(tx.transaction_id)) {
+                    for (const tx of transactions) {
+                        if (processedHashes.has(tx.hash)) {
+                            console.log(`[TRON] ⏭️ Ya procesada: ${tx.hash}`);
                             continue;
                         }
                         
-                        // Verificar que sea USDT
-                        if (tx.tokenInfo && tx.tokenInfo.tokenSymbol === 'USDT') {
-                            const decimals = tx.tokenInfo.tokenDecimal || 6;
-                            const amount = parseFloat(tx.quant) / Math.pow(10, decimals);
-                            
-                            console.log(`[TRON] Transacción USDT: ${amount} (${tx.transaction_id})`);
-                            
-                            // Buscar coincidencia
-                            const matchingOrder = pendingOrders.find(order => {
-                                const diff = Math.abs(order.amount - amount);
-                                console.log(`   Comparando: ${order.amount} vs ${amount}, diff: ${diff}`);
-                                return diff < 0.01;
-                            });
+                        console.log(`[TRON] 🔍 Verificando: ${tx.amount} USDT`);
+                        
+                        const matchingOrder = validOrders.find(order => 
+                            Math.abs(order.amount - tx.amount) < CONFIG.TOLERANCE
+                        );
 
-                            if (matchingOrder) {
-                                console.log(`[TRON] COINCIDENCIA ENCONTRADA!`);
-                                console.log(`   Usuario: ${matchingOrder.user_id}`);
-                                console.log(`   Monto: ${amount} USDT`);
-                                console.log(`   Hash: ${tx.transaction_id}`);
-                                
-                                // Marcar como procesada
-                                processedHashes.add(tx.transaction_id);
-                                
-                                // Activar usuario
-                                await activateUser(matchingOrder.user_id, tx.transaction_id);
-                            }
+                        if (matchingOrder) {
+                            console.log(`[TRON] 🎉 PAGO DETECTADO!`);
+                            console.log(`   💰 Monto: ${tx.amount} USDT`);
+                            console.log(`   👤 Usuario: ${matchingOrder.user_id}`);
+                            console.log(`   🆔 Orden: ${matchingOrder.id}`);
+                            console.log(`   🔗 Hash: ${tx.hash}`);
+                            
+                            processedHashes.add(tx.hash);
+                            await activateUser(matchingOrder.user_id, tx.hash, 'TRON', tx.amount);
+                            
+                            // Enviar notificación opcional
+                            await sendPaymentNotification(matchingOrder, tx, 'TRON');
+                        } else {
+                            console.log(`[TRON] ❌ Sin coincidencia para ${tx.amount} USDT`);
                         }
                     }
-                } else {
-                    console.log('[TRON] No se encontraron transacciones TRC20');
-                }
-            } else {
-                console.log(`[TRON] Error obteniendo transacciones: ${txResponse.status}`);
-            }
-            
-        } else {
-            console.log(`[TRON] Error en TronScan: ${response.status} - ${response.statusText}`);
-        }
-
-    } catch (error) {
-        console.error('[TRON] Error:', error.message);
-        
-        // Si todo falla, intentar activación manual para testing
-        await tryManualActivation();
-    }
-}
-
-/**
- * FUNCIÓN DE EMERGENCIA: Activación manual para testing
- */
-async function tryManualActivation() {
-    console.log('[TRON] MODO MANUAL: Verificando si hay transacciones conocidas...');
-    
-    try {
-        const { data: pendingOrders } = await supabase
-            .from('payment_orders')
-            .select('user_id, amount, created_at')
-            .eq('status', 'pending');
-
-        if (pendingOrders && pendingOrders.length > 0) {
-            console.log('[TRON] MODO MANUAL: Encontradas órdenes pendientes');
-            
-            // Para testing: si hay una orden pendiente de hace más de 1 minuto
-            // y sabemos que se envió la transacción, activarla
-            for (const order of pendingOrders) {
-                const orderTime = new Date(order.created_at);
-                const now = new Date();
-                const timeDiff = (now - orderTime) / 1000 / 60; // minutos
-                
-                if (timeDiff > 1) { // Más de 1 minuto
-                    console.log(`[TRON] MODO MANUAL: Orden del usuario ${order.user_id} tiene ${timeDiff.toFixed(1)} minutos`);
-                    console.log(`[TRON] MODO MANUAL: Para testing, activando automáticamente...`);
                     
-                    // Hash ficticio para testing
-                    const testHash = `test_manual_${Date.now()}`;
-                    await activateUser(order.user_id, testHash);
-                    break; // Solo una por ciclo
+                    return; // Salir después del primer API exitoso
                 }
+            } catch (apiError) {
+                console.log(`[TRON] ❌ Error ${api.name}: ${apiError.message}`);
+                continue;
             }
         }
+
+        console.log('[TRON] 📭 No se encontraron transacciones en ninguna API');
+
     } catch (error) {
-        console.error('[TRON] Error en modo manual:', error.message);
+        console.error('[TRON] 💥 Error general:', error.message);
     }
 }
 
 /**
- * Función BSC sin cambios
+ * BSC MAINNET
  */
 async function checkBscPayments() {
-    console.log('[BSC] Iniciando chequeo...');
+    console.log('[BSC] 🔍 Verificando pagos mainnet...');
 
     if (!ETHERSCAN_API_KEY) {
-        console.log('[BSC] ETHERSCAN_API_KEY no disponible.');
+        console.log('[BSC] ❌ ETHERSCAN_API_KEY requerida');
         return;
     }
 
     try {
         const { data: pendingOrders, error } = await supabase
             .from('payment_orders')
-            .select('user_id, amount')
+            .select('user_id, amount, created_at, id')
             .eq('status', 'pending');
             
         if (error) throw error;
-        if (!pendingOrders || pendingOrders.length === 0) {
-            console.log('[BSC] No hay órdenes pendientes.');
+        if (!pendingOrders?.length) {
+            console.log('[BSC] ⚪ Sin órdenes pendientes');
             return;
         }
 
-        const apiUrl = `https://api-testnet.bscscan.com/api?module=account&action=tokentx&address=${BSC_TREASURY_ADDRESS}&startblock=0&endblock=99999999&sort=desc&apikey=${ETHERSCAN_API_KEY}`;
+        // API de BSC mainnet
+        const apiUrl = `https://api.bscscan.com/api?module=account&action=tokentx&contractaddress=${BSC_USDT_CONTRACT}&address=${BSC_TREASURY_ADDRESS}&page=1&offset=50&sort=desc&apikey=${ETHERSCAN_API_KEY}`;
         
-        const response = await fetch(apiUrl);
+        const response = await fetch(apiUrl, { timeout: CONFIG.API_TIMEOUT });
         if (!response.ok) throw new Error(`BscScan error: ${response.statusText}`);
         
         const data = await response.json();
-        if (data.status === "1" && data.result.length > 0) {
-            console.log(`[BSC] Encontradas ${data.result.length} transacciones`);
+        if (data.status === "1" && data.result?.length > 0) {
+            console.log(`[BSC] ✅ ${data.result.length} transacciones encontradas`);
             
             for (const tx of data.result) {
-                const amount_paid = parseFloat(ethers.formatUnits(tx.value, parseInt(tx.tokenDecimal)));
-                const matchingOrder = pendingOrders.find(order => Math.abs(order.amount - amount_paid) < 0.01);
+                if (processedHashes.has(tx.hash)) continue;
+                
+                const amount = parseFloat(ethers.formatUnits(tx.value, parseInt(tx.tokenDecimal || 18)));
+                
+                // Filtrar por monto mínimo si está en testing
+                if (CONFIG.TESTING_MODE && amount < CONFIG.MIN_AMOUNT) continue;
+                
+                console.log(`[BSC] 🔍 Verificando: ${amount} ${tx.tokenSymbol}`);
+                
+                const matchingOrder = pendingOrders.find(order => 
+                    Math.abs(order.amount - amount) < CONFIG.TOLERANCE
+                );
                 
                 if (matchingOrder) {
-                    console.log(`[BSC] Coincidencia: ${amount_paid}, Usuario: ${matchingOrder.user_id}`);
-                    await activateUser(matchingOrder.user_id, tx.hash);
+                    console.log(`[BSC] 🎉 PAGO DETECTADO!`);
+                    console.log(`   💰 Monto: ${amount} ${tx.tokenSymbol}`);
+                    console.log(`   👤 Usuario: ${matchingOrder.user_id}`);
+                    console.log(`   🔗 Hash: ${tx.hash}`);
+                    
+                    processedHashes.add(tx.hash);
+                    await activateUser(matchingOrder.user_id, tx.hash, 'BSC', amount);
+                    await sendPaymentNotification(matchingOrder, { hash: tx.hash, amount }, 'BSC');
                 }
             }
+        } else {
+            console.log('[BSC] 📭 No hay transacciones recientes');
         }
     } catch (error) {
-        console.error('[BSC] Error:', error.message);
+        console.error('[BSC] 💥 Error:', error.message);
     }
 }
 
 /**
- * Función de activación simplificada con máximo debugging
+ * Parsers para diferentes APIs
  */
-async function activateUser(userId, transactionHash) {
-    console.log(`========================================`);
-    console.log(`INICIANDO ACTIVACIÓN DE USUARIO`);
-    console.log(`Usuario ID: ${userId}`);
-    console.log(`Hash: ${transactionHash}`);
-    console.log(`Timestamp: ${new Date().toISOString()}`);
-    console.log(`========================================`);
+function parseTronScanResponse(data) {
+    if (!data.token_transfers) return [];
+    
+    return data.token_transfers
+        .filter(tx => 
+            tx.contractAddress === TRON_USDT_CONTRACT && 
+            tx.to_address === TRON_TREASURY_ADDRESS &&
+            tx.tokenInfo?.tokenSymbol === 'USDT'
+        )
+        .map(tx => ({
+            amount: parseFloat(tx.quant) / Math.pow(10, tx.tokenInfo.tokenDecimal || 6),
+            hash: tx.transaction_id,
+            timestamp: tx.block_timestamp,
+            from: tx.from_address
+        }));
+}
+
+function parseTronGridResponse(data) {
+    if (!data.data) return [];
+    
+    return data.data
+        .filter(tx => 
+            tx.token_info?.address === TRON_USDT_CONTRACT &&
+            tx.to === TRON_TREASURY_ADDRESS
+        )
+        .map(tx => ({
+            amount: parseInt(tx.value) / Math.pow(10, tx.token_info.decimals || 6),
+            hash: tx.transaction_id,
+            timestamp: tx.block_timestamp,
+            from: tx.from
+        }));
+}
+
+/**
+ * Activación de usuario mejorada
+ */
+async function activateUser(userId, transactionHash, network, amount) {
+    const startTime = Date.now();
+    console.log(`🔄 ACTIVANDO USUARIO ${userId} (${network})...`);
     
     try {
-        // Paso 1: Verificar usuario actual
-        console.log(`PASO 1: Obteniendo estado actual del usuario...`);
+        // Verificar estado actual
         const { data: currentUser, error: fetchError } = await supabase
             .from('users')
-            .select('*')
+            .select('id, status, username')
             .eq('id', userId)
             .single();
 
-        if (fetchError) {
-            console.error(`ERROR PASO 1:`, fetchError);
-            throw fetchError;
-        }
-
-        console.log(`Usuario encontrado:`, currentUser);
-        console.log(`Estado actual: ${currentUser?.status}`);
+        if (fetchError) throw fetchError;
 
         if (currentUser?.status === 'activo') {
-            console.log(`USUARIO YA ESTÁ ACTIVO - SALTANDO`);
+            console.log(`⚠️ Usuario ${userId} ya activo`);
             return;
         }
 
-        // Paso 2: Actualizar usuario
-        console.log(`PASO 2: Actualizando usuario a 'activo'...`);
-        const { data: updatedUser, error: userError } = await supabase
+        // Transacción de activación
+        const { error: userError } = await supabase
             .from('users')
-            .update({ 
-                status: 'activo',
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', userId)
-            .select();
+            .update({ status: 'activo' })
+            .eq('id', userId);
             
-        if (userError) {
-            console.error(`ERROR PASO 2:`, userError);
-            throw userError;
-        }
+        if (userError) throw userError;
 
-        console.log(`Usuario actualizado exitosamente:`, updatedUser);
-
-        // Paso 3: Completar orden
-        console.log(`PASO 3: Completando orden de pago...`);
-        const { data: updatedOrder, error: orderError } = await supabase
+        const { error: orderError } = await supabase
             .from('payment_orders')
             .update({ 
                 status: 'completed', 
                 transaction_hash: transactionHash,
-                updated_at: new Date().toISOString()
+                network: network,
+                completed_at: new Date().toISOString()
             })
             .eq('user_id', userId)
-            .eq('status', 'pending')
-            .select();
+            .eq('status', 'pending');
             
-        if (orderError) {
-            console.error(`ERROR PASO 3:`, orderError);
-            throw orderError;
-        }
+        if (orderError) throw orderError;
 
-        console.log(`Orden completada exitosamente:`, updatedOrder);
+        const duration = Date.now() - startTime;
+        console.log(`✅ ACTIVACIÓN EXITOSA (${duration}ms)`);
+        console.log(`   👤 Usuario: ${currentUser.username} (ID: ${userId})`);
+        console.log(`   💰 Pago: ${amount} USDT via ${network}`);
+        console.log(`   🔗 Hash: ${transactionHash}`);
 
-        console.log(`========================================`);
-        console.log(`✅ ACTIVACIÓN COMPLETADA EXITOSAMENTE!`);
-        console.log(`Usuario: ${userId} -> ACTIVO`);
-        console.log(`Hash: ${transactionHash}`);
-        console.log(`========================================`);
-        
     } catch (error) {
-        console.log(`========================================`);
-        console.error(`❌ ERROR CRÍTICO EN ACTIVACIÓN:`);
-        console.error(`Usuario: ${userId}`);
-        console.error(`Error:`, error);
-        console.error(`Mensaje: ${error.message}`);
-        console.log(`========================================`);
+        console.error(`❌ ERROR ACTIVANDO USUARIO ${userId}:`, error.message);
     }
 }
 
 /**
- * Función principal
+ * Sistema de notificaciones opcional
+ */
+async function sendPaymentNotification(order, transaction, network) {
+    try {
+        // Aquí puedes agregar notificaciones por email, Slack, Discord, etc.
+        console.log(`📧 Notificación: Pago recibido - Usuario ${order.user_id}, ${transaction.amount} USDT via ${network}`);
+        
+        // Ejemplo para Slack (opcional):
+        // await fetch(process.env.SLACK_WEBHOOK, {
+        //     method: 'POST',
+        //     headers: { 'Content-Type': 'application/json' },
+        //     body: JSON.stringify({
+        //         text: `💰 Pago recibido: ${transaction.amount} USDT via ${network}\nUsuario: ${order.user_id}\nHash: ${transaction.hash}`
+        //     })
+        // });
+
+    } catch (error) {
+        console.log('⚠️ Error enviando notificación:', error.message);
+    }
+}
+
+/**
+ * Función principal del listener
  */
 function startListener() {
-    const interval = 30000; // 30 segundos para reducir carga
-    console.log(`Iniciando listener cada ${interval/1000} segundos`);
+    const mode = CONFIG.TESTING_MODE ? 'TESTING' : 'PRODUCCIÓN';
+    console.log(`\n🚀 INICIANDO LISTENER - MODO ${mode}`);
+    console.log(`⏰ Intervalo: ${CONFIG.POLL_INTERVAL/1000}s`);
+    console.log(`💰 Monto mínimo: ${CONFIG.MIN_AMOUNT} USDT`);
+    console.log(`🎯 Tolerancia: ${CONFIG.TOLERANCE} USDT`);
     
     const runChecks = async () => {
-        console.log('\n=================== NUEVO CICLO ===================');
-        const start = Date.now();
+        const cycleStart = Date.now();
+        console.log('\n' + '='.repeat(50));
+        console.log(`🔄 CICLO ${mode} - ${new Date().toISOString()}`);
+        console.log('='.repeat(50));
         
         await Promise.allSettled([
             checkTronPayments(),
             checkBscPayments()
         ]);
         
-        console.log(`Ciclo completado en ${Date.now() - start}ms`);
-        console.log('==================================================\n');
+        const cycleDuration = Date.now() - cycleStart;
+        console.log(`⏱️ Ciclo completado en ${cycleDuration}ms`);
+        console.log('='.repeat(50) + '\n');
     };
 
-    // Primer chequeo inmediato
-    setTimeout(runChecks, 2000);
+    // Primer chequeo después de 5 segundos
+    setTimeout(runChecks, 5000);
     
     // Chequeos periódicos
-    setInterval(runChecks, interval);
+    setInterval(runChecks, CONFIG.POLL_INTERVAL);
     
-    console.log('Listener iniciado correctamente!');
+    console.log(`✅ Listener ${mode} iniciado correctamente!`);
 }
+
+// Manejo de errores no capturados
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('💥 Unhandled Rejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('💥 Uncaught Exception:', error);
+});
 
 module.exports = { startListener };
