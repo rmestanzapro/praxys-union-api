@@ -17,10 +17,10 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Simplificar la configuración
 const CONFIG = {
     TESTING_MODE: process.env.TESTING_MODE === "true",
-    MIN_AMOUNT: 1,
-    PRODUCTION_AMOUNT: 15
+    BASE_AMOUNT: process.env.TESTING_MODE === "true" ? 1 : 15
 };
 
 // =================================================================
@@ -100,34 +100,25 @@ app.post('/register', async (req, res) => {
             .single();
         if (newUserError) { throw newUserError; }
 
-        // Determinar el monto base según el modo
-        const baseAmount = CONFIG.TESTING_MODE ? CONFIG.MIN_AMOUNT : CONFIG.PRODUCTION_AMOUNT;
-        
-        // Agregar un valor aleatorio pequeño para hacer el monto único
-        const uniqueAmount = baseAmount + parseFloat((Math.random() * 0.01).toFixed(6));
+        // Crear orden con monto único (igual que en producción, solo cambia el monto base)
+        const uniqueAmount = CONFIG.BASE_AMOUNT + parseFloat((Math.random() * 0.01).toFixed(6));
 
-        // Crear la orden con el monto único
         const { data: newOrder, error: orderError } = await supabase
             .from('payment_orders')
             .insert({ 
                 user_id: newUser.id, 
                 amount: uniqueAmount, 
-                status: 'pending',
-                test_mode: CONFIG.TESTING_MODE // Opcional: guardar el modo en que se creó
+                status: 'pending'
             })
             .select('id')
             .single();
 
         if (orderError) { throw orderError; }
 
-        // Log para desarrollo
-        console.log(`🔷 Nueva orden creada: ${uniqueAmount} USDT (${CONFIG.TESTING_MODE ? 'Testing' : 'Producción'})`);
-
         res.status(201).json({ 
             message: 'Usuario creado exitosamente', 
             user: newUser, 
-            orderId: newOrder.id,
-            testMode: CONFIG.TESTING_MODE
+            orderId: newOrder.id
         });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor: ' + error.message });
