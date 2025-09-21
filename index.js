@@ -1,13 +1,10 @@
-// =================================================================
-// --- 1. IMPORTACIONES Y CONFIGURACIÓN ---
-// =================================================================
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { startListener } = require('./listener.js'); // --- NUEVA IMPORTACIÓN ---
+const { startListener } = require('./listener.js');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
@@ -17,21 +14,27 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Simplificar la configuración
+// Configuración
 const CONFIG = {
     TESTING_MODE: process.env.TESTING_MODE === "true",
-    BASE_AMOUNT: process.env.TESTING_MODE === "true" ? 1 : 15
+    BASE_AMOUNT: process.env.TESTING_MODE === "true" ? 1 : 15, // 1 USDT base en testing
+    DEFAULT_NETWORK: 'tron',
+    DEFAULT_EXPIRATION_MINUTES: 15,
 };
 
-// =================================================================
-// --- 2. MIDDLEWARES ---
-// =================================================================
+// Direcciones de treasury desde .env
+const TRON_ADDRESS = process.env.TRON_TREASURY_ADDRESS;
+const BSC_ADDRESS = process.env.BSC_TREASURY_ADDRESS;
+
+// Validadores de direcciones
+const isValidTronAddress = (address) => /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(address);
+const isValidBscAddress = (address) => /^0x[a-fA-F0-9]{40}$/.test(address);
+
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-// =================================================================
-// --- 3. MIDDLEWARE DE AUTENTICACIÓN (EL "GUARDIAN") ---
-// =================================================================
+// Middleware de autenticación
 function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -44,11 +47,7 @@ function authenticateToken(req, res, next) {
     });
 }
 
-// =================================================================
-// --- 4. ENDPOINTS PÚBLICOS ---
-// =================================================================
-
-// --- ENDPOINT PARA OBTENER INFO DEL REFERENTE (USA REFERRAL_CODE) ---
+// Endpoint para info del referente
 app.get('/api/referrer-info', async (req, res) => {
     const { ref_code } = req.query;
     if (!ref_code) {
@@ -65,15 +64,16 @@ app.get('/api/referrer-info', async (req, res) => {
         }
         res.status(200).json({ display_name: user.first_name });
     } catch (error) {
-        res.status(500).json({ error: 'Error interno del servidor: ' + error.message });
+        console.error('Error en referrer-info:', error.message);
+        res.status(500).json({ error: 'Error interno del servidor.' });
     }
 });
 
-// --- ENDPOINT DE REGISTRO DE USUARIOS (VALIDA CON REFERRAL_CODE) ---
+// Endpoint de registro
 app.post('/register', async (req, res) => {
     const { email, password, username, first_name, last_name, country, referral_code } = req.body;
     if (!email || !password || !username || !referral_code || !first_name || !last_name || !country) {
-        return res.status(400).json({ error: 'Todos los campos, incluido el código de referido, son requeridos.' });
+        return res.status(400).json({ error: 'Todos los campos son requeridos.' });
     }
     try {
         const { data: existingUser } = await supabase.from('users').select('email, username').or(`email.eq.${email},username.eq.${username}`).single();
@@ -85,9 +85,8 @@ app.post('/register', async (req, res) => {
             .eq('referral_code', referral_code)
             .single();
         if (findParentError || !parentUser) {
-            return res.status(404).json({ error: 'El código de referido proporcionado no es válido o no existe.' });
+            return res.status(404).json({ error: 'Código de referido inválido.' });
         }
-        const parentId = parentUser.id;
 
         const salt = await bcrypt.genSalt(10);
         const password_hash = await bcrypt.hash(password, salt);
@@ -95,13 +94,16 @@ app.post('/register', async (req, res) => {
 
         const { data: newUser, error: newUserError } = await supabase
             .from('users')
-            .insert({ email, username, password_hash, referral_code: newUserReferralCode, referred_by_id: parentId, first_name, last_name, country, contribution: 15, group_name: 'Starter' })
+            .insert({ email, username, password_hash, referral_code: newUserReferralCode, referred_by_id: parentUser.id, first_name, last_name, country, contribution: CONFIG.BASE_AMOUNT, group_name: 'Starter' })
             .select()
             .single();
         if (newUserError) { throw newUserError; }
 
-        // Crear orden con monto único (igual que en producción, solo cambia el monto base)
+        // Crear orden con monto único: base + random (igual en testing y producción)
         const uniqueAmount = CONFIG.BASE_AMOUNT + parseFloat((Math.random() * 0.01).toFixed(6));
+        if (uniqueAmount <= 0) throw new Error('Monto inválido.');
+
+        console.log(`[REGISTER] Creando orden con monto único: ${uniqueAmount} USDT ${CONFIG.TESTING_MODE ? '(Testing)' : '(Producción)'}`);
 
         const { data: newOrder, error: orderError } = await supabase
             .from('payment_orders')
@@ -121,11 +123,12 @@ app.post('/register', async (req, res) => {
             orderId: newOrder.id
         });
     } catch (error) {
-        res.status(500).json({ error: 'Error interno del servidor: ' + error.message });
+        console.error('Error en register:', error.message);
+        res.status(500).json({ error: 'Error interno del servidor.' });
     }
 });
 
-// --- ENDPOINT DE LOGIN DE USUARIOS ---
+// Endpoint de login
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) { return res.status(400).json({ error: 'Email y password son requeridos.' }); }
@@ -139,31 +142,87 @@ app.post('/login', async (req, res) => {
         const token = jwt.sign({ userId: user.id, email: user.email }, jwtSecret, { expiresIn: '24h' });
         res.status(200).json({ message: 'Login exitoso', token: token });
     } catch (error) {
-        res.status(500).json({ error: 'Error interno del servidor: ' + error.message });
+        console.error('Error en login:', error.message);
+        res.status(500).json({ error: 'Error interno del servidor.' });
     }
 });
 
-// --- ENDPOINT PARA DETALLES DEL CHECKOUT ---
+// Endpoint para detalles del checkout
 app.get('/api/checkout-details/:orderId', async (req, res) => {
     const { orderId } = req.params;
     try {
         const { data: order, error } = await supabase
             .from('payment_orders')
-            .select('amount')
+            .select('amount, created_at')
             .eq('id', orderId)
             .single();
         if (error || !order) {
-            return res.status(404).json({ error: 'Orden de pago no encontrada.' });
+            return res.status(404).json({ error: 'Orden no encontrada.' });
         }
-        res.status(200).json({ uniqueAmount: order.amount.toFixed(6) });
+
+        // Usar monto único de la DB (ya incluye random)
+        const uniqueAmount = Number(order.amount);
+        if (uniqueAmount <= 0) throw new Error('Monto inválido.');
+
+        // Red por default
+        const network = CONFIG.DEFAULT_NETWORK;
+        const address = network === 'tron' ? TRON_ADDRESS : BSC_ADDRESS;
+        const explorerBase = network === 'tron' ? 'https://tronscan.org/#/transaction/' : 'https://bscscan.com/tx/';
+
+        // Validar dirección
+        if (network === 'tron' && !isValidTronAddress(address)) {
+            throw new Error('Dirección TRON inválida.');
+        } else if (network === 'bsc' && !isValidBscAddress(address)) {
+            throw new Error('Dirección BSC inválida.');
+        }
+
+        // Expiración (15 min después de created_at)
+        const createdAt = new Date(order.created_at);
+        const expiresAt = new Date(createdAt.getTime() + CONFIG.DEFAULT_EXPIRATION_MINUTES * 60 * 1000).toISOString();
+
+        console.log(`[CHECKOUT-DETAILS] Orden ${orderId}: ${uniqueAmount.toFixed(6)} USDT ${CONFIG.TESTING_MODE ? '(Testing)' : '(Producción)'}`);
+
+        res.status(200).json({
+            uniqueAmount: uniqueAmount.toFixed(6),
+            network,
+            address,
+            explorerBase,
+            expiresAt,
+            symbol: 'USDT',
+            color: network === 'tron' ? 'text-red-500' : 'text-yellow-500',
+            badgeClass: network === 'tron' ? 'bg-red-500/15 border border-red-500/40' : 'bg-yellow-500/15 border border-yellow-500/40',
+        });
     } catch (error) {
-        res.status(500).json({ error: 'Error interno del servidor: ' + error.message });
+        console.error('Error en checkout-details:', error.message);
+        res.status(500).json({ error: 'Error interno del servidor.' });
     }
 });
 
-// =================================================================
-// --- 5. ENDPOINTS PROTEGIDOS ---
-// =================================================================
+// NUEVO: Endpoint para estado del pago (para frontend polling)
+app.get('/api/payment-status/:orderId', async (req, res) => {
+    const { orderId } = req.params;
+    try {
+        const { data: order, error } = await supabase
+            .from('payment_orders')
+            .select('status, transaction_hash, completed_at, network')
+            .eq('id', orderId)
+            .single();
+        if (error || !order) {
+            return res.status(404).json({ error: 'Orden no encontrada.' });
+        }
+
+        const status = order.status === 'completed' ? 'completed' : (order.status === 'failed' ? 'failed' : 'pending');
+        res.status(200).json({
+            status,
+            txHash: order.transaction_hash || null,
+        });
+    } catch (error) {
+        console.error('Error en payment-status:', error.message);
+        res.status(500).json({ error: 'Error interno del servidor.' });
+    }
+});
+
+// Endpoints protegidos
 app.get('/me/tree', authenticateToken, async (req, res) => {
     const userId = req.user.userId;
     try {
@@ -171,13 +230,12 @@ app.get('/me/tree', authenticateToken, async (req, res) => {
         if (error) { throw error; }
         res.status(200).json({ message: 'Árbol del usuario obtenido con éxito', tree: data });
     } catch (error) {
-        res.status(500).json({ error: 'Error interno del servidor: ' + error.message });
+        console.error('Error en me/tree:', error.message);
+        res.status(500).json({ error: 'Error interno del servidor.' });
     }
 });
 
-// =================================================================
-// --- 6. RUTAS DE PRUEBA ---
-// =================================================================
+// Rutas de prueba
 app.get('/test-db', async (req, res) => {
     const { data, error } = await supabase.from('users').select('*');
     if (error) { res.status(500).json({ error: error.message }); }
@@ -188,12 +246,8 @@ app.get('/', (req, res) => {
     res.json({ message: "Welcome to the Praxys Union API! Ready for production." });
 });
 
-// =================================================================
-// --- 7. INICIAR SERVIDOR ---
-// =================================================================
+// Iniciar servidor
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
-    startListener(); // --- INICIAR LISTENER ---
+    startListener();
 });
-
-
