@@ -1,6 +1,3 @@
-// listener.js - PRODUCCIÓN MAINNET
-// Configurado para recibir pagos en las direcciones reales
-
 const { ethers } = require('ethers');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
@@ -10,15 +7,22 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// --- CONFIGURACIÓN PRODUCCIÓN ---
-const TRON_TREASURY_ADDRESS = 'TQPF5KMutqorntfMmEVSknrvDRaPudxCdfrW';
-const BSC_TREASURY_ADDRESS = '0x731A28a2FfDC9399h2d59420B665Ae3f3644DE78';
+// Configuración producción
+const TRON_TREASURY_ADDRESS = process.env.TRON_TREASURY_ADDRESS;
+const BSC_TREASURY_ADDRESS = process.env.BSC_TREASURY_ADDRESS;
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 const TRONGRID_API_KEY = process.env.TRONGRID_API_KEY;
 
 // Contratos mainnet
 const TRON_USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'; // USDT Mainnet
 const BSC_USDT_CONTRACT = '0x55d398326f99059ff775485246999027b3197955'; // USDT BSC Mainnet
+
+// Validadores
+const isValidTronAddress = (address) => /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(address);
+const isValidBscAddress = (address) => /^0x[a-fA-F0-9]{40}$/.test(address);
+
+if (!isValidTronAddress(TRON_TREASURY_ADDRESS)) throw new Error('Dirección TRON inválida en .env');
+if (!isValidBscAddress(BSC_TREASURY_ADDRESS)) throw new Error('Dirección BSC inválida en .env');
 
 console.log('🚀 LISTENER PRODUCCIÓN - MAINNET INICIADO');
 console.log(`📍 TRON Treasury: ${TRON_TREASURY_ADDRESS}`);
@@ -30,21 +34,21 @@ const processedHashes = new Set();
 // Configuración flexible para testing
 const CONFIG = {
     TESTING_MODE: process.env.TESTING_MODE === "true",
-    MIN_AMOUNT: 1,
-    TOLERANCE: 0.01,
+    BASE_AMOUNT: process.env.TESTING_MODE === "true" ? 1 : 15, // Base para logs
+    TOLERANCE: 0.01, // Siempre 0.01 para capturar monto único + variaciones
     POLL_INTERVAL: process.env.TESTING_MODE === "true" ? 5000 : 10000,
-    API_TIMEOUT: 15000
+    API_TIMEOUT: 15000,
+    MAX_API_RETRIES: 3,
 };
 
-// Agregar log inicial de modo
 console.log(`🔧 Modo: ${CONFIG.TESTING_MODE ? '🧪 TESTING' : '🚀 PRODUCCIÓN'}`);
-console.log(`💰 Monto mínimo testing: ${CONFIG.MIN_AMOUNT} USDT`);
+console.log(`💰 Monto base: ${CONFIG.BASE_AMOUNT} USDT (con ajuste aleatorio ~${CONFIG.BASE_AMOUNT}.00xxx)`);
 
 /**
- * TRON MAINNET - Sistema robusto con múltiples APIs
+ * TRON MAINNET
  */
 async function checkTronPayments() {
-    console.log(`[TRON] 🔍 Verificando pagos ${CONFIG.TESTING_MODE ? '(Testing)' : '(Producción)'}...`);
+    console.log(`[TRON] 🔍 Verificando pagos ${CONFIG.TESTING_MODE ? `(Testing: ~${CONFIG.BASE_AMOUNT}.00xxx USDT)` : '(Producción)'}...`);
     
     try {
         const { data: pendingOrders, error } = await supabase
@@ -58,21 +62,15 @@ async function checkTronPayments() {
             return;
         }
 
-        // Filtrar órdenes según modo testing
-        const validOrders = CONFIG.TESTING_MODE 
-            ? pendingOrders.filter(order => Math.abs(order.amount - CONFIG.MIN_AMOUNT) < CONFIG.TOLERANCE)
-            : pendingOrders;
-
-        if (CONFIG.TESTING_MODE) {
-            console.log(`[TRON] 🧪 Modo testing - Buscando pagos de ${CONFIG.MIN_AMOUNT} USDT`);
-        }
+        // Filtrar solo órdenes válidas (todas en producción; en testing, todas ya que montos ~1.xx)
+        const validOrders = pendingOrders; // No filtro extra; usa tolerancia para unicidad
 
         if (validOrders.length === 0) {
-            console.log(`[TRON] ⚠️ No hay órdenes >= ${CONFIG.MIN_AMOUNT} USDT`);
+            console.log(`[TRON] ⚠️ No hay órdenes pendientes`);
             return;
         }
 
-        // APIs de mainnet en orden de prioridad
+        // APIs de mainnet
         const apis = [
             {
                 name: 'TronScan Mainnet',
@@ -92,64 +90,69 @@ async function checkTronPayments() {
         ];
 
         for (const api of apis) {
-            try {
-                console.log(`[TRON] 🌐 ${api.name}...`);
-                
-                const response = await fetch(api.url, {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json',
-                        'User-Agent': 'PaymentListener/1.0',
-                        ...(TRONGRID_API_KEY && { 'TRON-PRO-API-KEY': TRONGRID_API_KEY })
-                    },
-                    timeout: CONFIG.API_TIMEOUT
-                });
-
-                if (!response.ok) {
-                    console.log(`[TRON] ❌ ${api.name}: ${response.status}`);
-                    continue;
-                }
-
-                const data = await response.json();
-                const transactions = api.parser(data);
-                
-                if (transactions.length > 0) {
-                    console.log(`[TRON] ✅ ${api.name}: ${transactions.length} transacciones`);
+            let retries = 0;
+            while (retries < CONFIG.MAX_API_RETRIES) {
+                try {
+                    console.log(`[TRON] 🌐 ${api.name} (Intento ${retries + 1})...`);
                     
-                    for (const tx of transactions) {
-                        if (processedHashes.has(tx.hash)) {
-                            console.log(`[TRON] ⏭️ Ya procesada: ${tx.hash}`);
-                            continue;
-                        }
-                        
-                        console.log(`[TRON] 🔍 Verificando: ${tx.amount} USDT`);
-                        
-                        const matchingOrder = validOrders.find(order => 
-                            Math.abs(order.amount - tx.amount) < CONFIG.TOLERANCE
-                        );
+                    const response = await fetch(api.url, {
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                            'User-Agent': 'PaymentListener/1.0',
+                            ...(TRONGRID_API_KEY && { 'TRON-PRO-API-KEY': TRONGRID_API_KEY })
+                        },
+                        timeout: CONFIG.API_TIMEOUT
+                    });
 
-                        if (matchingOrder) {
-                            console.log(`[TRON] 🎉 PAGO DETECTADO!`);
-                            console.log(`   💰 Monto: ${tx.amount} USDT`);
-                            console.log(`   👤 Usuario: ${matchingOrder.user_id}`);
-                            console.log(`   🆔 Orden: ${matchingOrder.id}`);
-                            console.log(`   🔗 Hash: ${tx.hash}`);
-                            
-                            processedHashes.add(tx.hash);
-                            await activateUser(matchingOrder.user_id, tx.hash, 'TRON', tx.amount);
-                            
-                            // Enviar notificación opcional
-                            await sendPaymentNotification(matchingOrder, tx, 'TRON');
-                        } else {
-                            console.log(`[TRON] ❌ Sin coincidencia para ${tx.amount} USDT`);
-                        }
+                    if (!response.ok) {
+                        console.log(`[TRON] ❌ ${api.name}: ${response.status}`);
+                        retries++;
+                        continue;
                     }
+
+                    const data = await response.json();
+                    const transactions = api.parser(data);
                     
-                    return; // Salir después del primer API exitoso
+                    if (transactions.length > 0) {
+                        console.log(`[TRON] ✅ ${api.name}: ${transactions.length} transacciones`);
+                        
+                        for (const tx of transactions) {
+                            if (processedHashes.has(tx.hash)) {
+                                console.log(`[TRON] ⏭️ Ya procesada: ${tx.hash}`);
+                                continue;
+                            }
+                            
+                            console.log(`[TRON] 🔍 Verificando: ${tx.amount} USDT`);
+                            
+                            const matchingOrder = validOrders.find(order => 
+                                Math.abs(order.amount - tx.amount) < CONFIG.TOLERANCE
+                            );
+
+                            if (matchingOrder) {
+                                console.log(`[TRON] 🎉 PAGO DETECTADO!`);
+                                console.log(`   💰 Monto: ${tx.amount} USDT (coincide con orden ${matchingOrder.amount})`);
+                                console.log(`   👤 Usuario: ${matchingOrder.user_id}`);
+                                console.log(`   🆔 Orden: ${matchingOrder.id}`);
+                                console.log(`   🔗 Hash: ${tx.hash}`);
+                                
+                                processedHashes.add(tx.hash);
+                                await activateUser(matchingOrder.user_id, tx.hash, 'TRON', tx.amount);
+                                
+                                await sendPaymentNotification(matchingOrder, tx, 'TRON');
+                            } else {
+                                console.log(`[TRON] ❌ Sin coincidencia para ${tx.amount} USDT (tolerancia ${CONFIG.TOLERANCE})`);
+                            }
+                        }
+                        
+                        return;
+                    }
+                    break;
+                } catch (apiError) {
+                    console.log(`[TRON] ❌ Error ${api.name} (Intento ${retries + 1}): ${apiError.message}`);
+                    retries++;
+                    if (retries >= CONFIG.MAX_API_RETRIES) break;
                 }
-            } catch (apiError) {
-                console.log(`[TRON] ❌ Error ${api.name}: ${apiError.message}`);
-                continue;
             }
         }
 
@@ -164,7 +167,7 @@ async function checkTronPayments() {
  * BSC MAINNET
  */
 async function checkBscPayments() {
-    console.log('[BSC] 🔍 Verificando pagos mainnet...');
+    console.log(`[BSC] 🔍 Verificando pagos ${CONFIG.TESTING_MODE ? `(Testing: ~${CONFIG.BASE_AMOUNT}.00xxx USDT)` : '(Producción)'}...`);
 
     if (!ETHERSCAN_API_KEY) {
         console.log('[BSC] ❌ ETHERSCAN_API_KEY requerida');
@@ -183,7 +186,13 @@ async function checkBscPayments() {
             return;
         }
 
-        // API de BSC mainnet
+        const validOrders = pendingOrders; // No filtro extra; usa tolerancia
+
+        if (validOrders.length === 0) {
+            console.log(`[BSC] ⚠️ No hay órdenes pendientes`);
+            return;
+        }
+
         const apiUrl = `https://api.bscscan.com/api?module=account&action=tokentx&contractaddress=${BSC_USDT_CONTRACT}&address=${BSC_TREASURY_ADDRESS}&page=1&offset=50&sort=desc&apikey=${ETHERSCAN_API_KEY}`;
         
         const response = await fetch(apiUrl, { timeout: CONFIG.API_TIMEOUT });
@@ -198,18 +207,15 @@ async function checkBscPayments() {
                 
                 const amount = parseFloat(ethers.formatUnits(tx.value, parseInt(tx.tokenDecimal || 18)));
                 
-                // Filtrar por monto mínimo si está en testing
-                if (CONFIG.TESTING_MODE && amount < CONFIG.MIN_AMOUNT) continue;
-                
                 console.log(`[BSC] 🔍 Verificando: ${amount} ${tx.tokenSymbol}`);
                 
-                const matchingOrder = pendingOrders.find(order => 
+                const matchingOrder = validOrders.find(order => 
                     Math.abs(order.amount - amount) < CONFIG.TOLERANCE
                 );
                 
                 if (matchingOrder) {
                     console.log(`[BSC] 🎉 PAGO DETECTADO!`);
-                    console.log(`   💰 Monto: ${amount} ${tx.tokenSymbol}`);
+                    console.log(`   💰 Monto: ${amount} ${tx.tokenSymbol} (coincide con orden ${matchingOrder.amount})`);
                     console.log(`   👤 Usuario: ${matchingOrder.user_id}`);
                     console.log(`   🔗 Hash: ${tx.hash}`);
                     
@@ -263,14 +269,13 @@ function parseTronGridResponse(data) {
 }
 
 /**
- * Activación de usuario mejorada
+ * Activación de usuario
  */
 async function activateUser(userId, transactionHash, network, amount) {
     const startTime = Date.now();
     console.log(`🔄 ACTIVANDO USUARIO ${userId} (${network})...`);
     
     try {
-        // Verificar estado actual
         const { data: currentUser, error: fetchError } = await supabase
             .from('users')
             .select('id, status, username')
@@ -284,7 +289,6 @@ async function activateUser(userId, transactionHash, network, amount) {
             return;
         }
 
-        // Transacción de activación
         const { error: userError } = await supabase
             .from('users')
             .update({ status: 'activo' })
@@ -317,22 +321,11 @@ async function activateUser(userId, transactionHash, network, amount) {
 }
 
 /**
- * Sistema de notificaciones opcional
+ * Notificaciones
  */
 async function sendPaymentNotification(order, transaction, network) {
     try {
-        // Aquí puedes agregar notificaciones por email, Slack, Discord, etc.
         console.log(`📧 Notificación: Pago recibido - Usuario ${order.user_id}, ${transaction.amount} USDT via ${network}`);
-        
-        // Ejemplo para Slack (opcional):
-        // await fetch(process.env.SLACK_WEBHOOK, {
-        //     method: 'POST',
-        //     headers: { 'Content-Type': 'application/json' },
-        //     body: JSON.stringify({
-        //         text: `💰 Pago recibido: ${transaction.amount} USDT via ${network}\nUsuario: ${order.user_id}\nHash: ${transaction.hash}`
-        //     })
-        // });
-
     } catch (error) {
         console.log('⚠️ Error enviando notificación:', error.message);
     }
@@ -345,7 +338,7 @@ function startListener() {
     const mode = CONFIG.TESTING_MODE ? 'TESTING' : 'PRODUCCIÓN';
     console.log(`\n🚀 INICIANDO LISTENER - MODO ${mode}`);
     console.log(`⏰ Intervalo: ${CONFIG.POLL_INTERVAL/1000}s`);
-    console.log(`💰 Monto mínimo: ${CONFIG.MIN_AMOUNT} USDT`);
+    console.log(`💰 Monto base: ${CONFIG.BASE_AMOUNT} USDT (con ajuste aleatorio)`);
     console.log(`🎯 Tolerancia: ${CONFIG.TOLERANCE} USDT`);
     
     const runChecks = async () => {
@@ -364,16 +357,12 @@ function startListener() {
         console.log('='.repeat(50) + '\n');
     };
 
-    // Primer chequeo después de 5 segundos
     setTimeout(runChecks, 5000);
-    
-    // Chequeos periódicos
     setInterval(runChecks, CONFIG.POLL_INTERVAL);
     
     console.log(`✅ Listener ${mode} iniciado correctamente!`);
 }
 
-// Manejo de errores no capturados
 process.on('unhandledRejection', (reason, promise) => {
     console.error('💥 Unhandled Rejection:', reason);
 });
