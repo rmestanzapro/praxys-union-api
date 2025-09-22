@@ -258,52 +258,34 @@ app.get('/api/payment-status/:orderId', async (req, res) => {
 });
 
 // NUEVO: Endpoint para webhook de Moralis (backup)
-app.post('/webhook', async (req, res) => {
+app.post('/webhook', express.json({ limit: '2mb' }), async (req, res) => {
     const body = req.body;
     const signature = req.headers['x-moralis-signature'];
+    const webhookSecret = process.env.MORALIS_WEBHOOK_SECRET;
 
-    // Verificar signature (Moralis usa SHA256 con webhook secret)
-    const webhookSecret = process.env.MORALIS_WEBHOOK_SECRET; // Añadir a .env
-    const computedSignature = crypto.createHmac('sha256', webhookSecret).update(JSON.stringify(body)).digest('hex');
+    // Si no hay firma → es la verificación inicial de Moralis
+    if (!signature) {
+        logger.infoWithContext('Handshake inicial de Moralis recibido');
+        return res.status(200).send('OK');
+    }
+
+    // Validar firma
+    const computedSignature = crypto
+        .createHmac('sha256', webhookSecret)
+        .update(JSON.stringify(body))
+        .digest('hex');
+
     if (signature !== computedSignature) {
-        logger.warnWithContext('Webhook signature inválida', { computed: computedSignature, received: signature });
+        logger.warnWithContext('Webhook signature inválida', {
+            computed: computedSignature,
+            received: signature
+        });
         return res.status(401).json({ error: 'Signature inválida.', error_code: 'WEBHOOK_INVALID_SIGNATURE' });
     }
 
-    logger.infoWithContext('Webhook recibido', { event: body.eventType, network: body.chainId });
+    logger.infoWithContext('Webhook recibido correctamente', { event: body.eventType, network: body.chainId });
 
-    // Procesar event (ejemplo para Transfer)
-    if (body.eventType === 'Transfer') {
-        const tx = body; // Adaptar a formato de Moralis (tx.amount, tx.hash, tx.timestamp, etc.)
-        const amount = parseFloat(tx.amount) / Math.pow(10, 6); // Asumir 6 decimales para USDT
-        const hash = tx.hash;
-        const timestamp = tx.timestamp * 1000; // Convertir a ms si es necesario
-        const network = body.chainId === '0x38' ? 'BSC' : 'TRON'; // Adaptar según chainId
-
-        // Encontrar matching order (lógica similar a listener)
-        const { data: pendingOrders, error } = await supabase
-            .from('payment_orders')
-            .select('user_id, amount, created_at, id')
-            .eq('status', 'pending');
-
-        if (error || !pendingOrders.length) return res.status(200).send('OK');
-
-        const matchingOrder = pendingOrders.find(order => 
-            Math.abs(order.amount - amount) < CONFIG.TOLERANCE
-        );
-
-        if (matchingOrder) {
-            // Validar timestamp
-            const orderCreatedAt = new Date(matchingOrder.created_at).getTime();
-            if (timestamp < orderCreatedAt - 3600000) { // 1 hora
-                logger.warnWithContext('Transacción antigua en webhook, omitiendo', { hash });
-                return res.status(200).send('OK');
-            }
-
-            await activateUser(matchingOrder.user_id, hash, network, amount);
-            await sendPaymentNotification(matchingOrder, { hash, amount }, network);
-        }
-    }
+    // Aquí puedes procesar el evento si lo necesitas
 
     res.status(200).send('OK');
 });
