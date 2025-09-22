@@ -260,30 +260,8 @@ app.get('/api/payment-status/:orderId', async (req, res) => {
 // NUEVO: Endpoint para webhook de Moralis (backup)
 app.post('/webhook', express.json({ limit: '2mb' }), async (req, res) => {
     const body = req.body;
-    const signature = req.headers['x-moralis-signature'];
-    const webhookSecret = process.env.MORALIS_WEBHOOK_SECRET;
-
-    // Si no hay firma → es la verificación inicial de Moralis
-    if (!signature) {
-        logger.infoWithContext('Handshake inicial de Moralis recibido');
-        return res.status(200).send('OK');
-    }
-
-    // Validar firma
-    const computedSignature = crypto
-        .createHmac('sha256', webhookSecret)
-        .update(JSON.stringify(body))
-        .digest('hex');
-
-    if (signature !== computedSignature) {
-        logger.warnWithContext('Webhook signature inválida', {
-            computed: computedSignature,
-            received: signature
-        });
-        return res.status(401).json({ error: 'Signature inválida.', error_code: 'WEBHOOK_INVALID_SIGNATURE' });
-    }
-
-    logger.infoWithContext('Webhook recibido correctamente', { event: body.eventType, network: body.chainId });
+    // En plan gratuito no hay firma, procesamos directo
+    logger.infoWithContext('Webhook recibido de Moralis', { event: body });
 
     // Aquí puedes procesar el evento si lo necesitas
 
