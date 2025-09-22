@@ -120,7 +120,7 @@ app.post('/register', async (req, res) => {
             p_country: country,
             p_referral_code: newUserReferralCode,
             p_parent_ref_code: referral_code,
-            p_base_amount: Math.floor(CONFIG.BASE_AMOUNT) // Asegurar entero para contribution
+            p_base_amount: Number(CONFIG.BASE_AMOUNT)
         });
 
         if (error) {
