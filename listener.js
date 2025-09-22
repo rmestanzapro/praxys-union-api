@@ -38,7 +38,8 @@ const CONFIG = {
     POLL_INTERVAL: process.env.TESTING_MODE === "true" ? 5000 : 10000,
     API_TIMEOUT: 15000,
     MAX_API_RETRIES: 3,
-    DEFAULT_EXPIRATION_MINUTES: 15
+    DEFAULT_EXPIRATION_MINUTES: 15,
+    TIMESTAMP_MARGIN: 3600000 // 1 hora en ms
 };
 
 logger.info(`Configuración del listener`, {
@@ -54,6 +55,8 @@ logger.info(`Configuración del listener`, {
 async function checkTronPayments() {
     logger.info(`[TRON] Verificando pagos ${CONFIG.TESTING_MODE ? `(Testing: ~${CONFIG.BASE_AMOUNT}.00xxx USDT)` : '(Producción)'}`);
     
+    let pollingFailed = true; // Flag para fallback
+
     try {
         const { data: pendingOrders, error } = await supabase
             .from('payment_orders')
@@ -63,12 +66,14 @@ async function checkTronPayments() {
         if (error) throw error;
         if (!pendingOrders?.length) {
             logger.info('[TRON] Sin órdenes pendientes');
+            pollingFailed = false;
             return;
         }
 
         const validOrders = pendingOrders;
         if (validOrders.length === 0) {
             logger.warn('[TRON] No hay órdenes pendientes válidas');
+            pollingFailed = false;
             return;
         }
 
@@ -142,6 +147,12 @@ async function checkTronPayments() {
                             );
 
                             if (matchingOrder) {
+                                const orderCreatedAt = new Date(matchingOrder.created_at).getTime();
+                                if (tx.timestamp < orderCreatedAt - CONFIG.TIMESTAMP_MARGIN) {
+                                    logger.warn('[TRON] Transacción antigua, omitiendo', { hash: tx.hash, tx_timestamp: tx.timestamp, order_created: orderCreatedAt });
+                                    continue;
+                                }
+
                                 logger.info(`[TRON] Pago detectado para orden ${matchingOrder.id}`, {
                                     amount: tx.amount,
                                     user_id: matchingOrder.user_id,
@@ -155,6 +166,7 @@ async function checkTronPayments() {
                             }
                         }
                         
+                        pollingFailed = false;
                         return;
                     }
                     break;
@@ -167,9 +179,15 @@ async function checkTronPayments() {
         }
 
         logger.info('[TRON] No se encontraron transacciones en ninguna API');
+        pollingFailed = false;
 
     } catch (error) {
         logger.error('[TRON] Error general en verificación de pagos', { error: error.message });
+    }
+
+    if (pollingFailed) {
+        logger.warn('[TRON] Polling falló en todas las APIs, cayendo a webhook backup');
+        // Aquí podrías implementar lógica adicional si es necesario, pero como webhook es push, no se necesita acción activa
     }
 }
 
@@ -178,6 +196,8 @@ async function checkTronPayments() {
  */
 async function checkBscPayments() {
     logger.info(`[BSC] Verificando pagos ${CONFIG.TESTING_MODE ? `(Testing: ~${CONFIG.BASE_AMOUNT}.00xxx USDT)` : '(Producción)'}`);
+
+    let pollingFailed = true;
 
     if (!ETHERSCAN_API_KEY) {
         logger.error('[BSC] ETHERSCAN_API_KEY requerida');
@@ -193,12 +213,14 @@ async function checkBscPayments() {
         if (error) throw error;
         if (!pendingOrders?.length) {
             logger.info('[BSC] Sin órdenes pendientes');
+            pollingFailed = false;
             return;
         }
 
         const validOrders = pendingOrders;
         if (validOrders.length === 0) {
             logger.warn('[BSC] No hay órdenes pendientes válidas');
+            pollingFailed = false;
             return;
         }
 
@@ -237,6 +259,13 @@ async function checkBscPayments() {
                 );
                 
                 if (matchingOrder) {
+                    const orderCreatedAt = new Date(matchingOrder.created_at).getTime();
+                    const txTimestamp = tx.timeStamp * 1000; // BscScan da segundos, convertir a ms
+                    if (txTimestamp < orderCreatedAt - CONFIG.TIMESTAMP_MARGIN) {
+                        logger.warn('[BSC] Transacción antigua, omitiendo', { hash: tx.hash, tx_timestamp: txTimestamp, order_created: orderCreatedAt });
+                        continue;
+                    }
+
                     logger.info(`[BSC] Pago detectado para orden ${matchingOrder.id}`, {
                         amount: amount,
                         user_id: matchingOrder.user_id,
@@ -247,11 +276,17 @@ async function checkBscPayments() {
                     await sendPaymentNotification(matchingOrder, { hash: tx.hash, amount }, 'BSC');
                 }
             }
+            pollingFailed = false;
         } else {
             logger.info('[BSC] No hay transacciones recientes');
+            pollingFailed = false;
         }
     } catch (error) {
         logger.error('[BSC] Error en verificación de pagos', { error: error.message });
+    }
+
+    if (pollingFailed) {
+        logger.warn('[BSC] Polling falló, cayendo a webhook backup');
     }
 }
 
@@ -270,7 +305,7 @@ function parseTronScanResponse(data) {
         .map(tx => ({
             amount: parseFloat(tx.quant) / Math.pow(10, tx.tokenInfo.tokenDecimal || 6),
             hash: tx.transaction_id,
-            timestamp: tx.block_timestamp,
+            timestamp: tx.block_timestamp, // ms
             from: tx.from_address
         }));
 }
@@ -286,7 +321,7 @@ function parseTronGridResponse(data) {
         .map(tx => ({
             amount: parseInt(tx.value) / Math.pow(10, tx.token_info.decimals || 6),
             hash: tx.transaction_id,
-            timestamp: tx.block_timestamp,
+            timestamp: tx.block_timestamp, // ms
             from: tx.from
         }));
 }
