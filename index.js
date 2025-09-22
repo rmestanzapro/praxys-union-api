@@ -6,7 +6,6 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto'); // Para verificación de signature de Moralis
-const Moralis = require('moralis').default; // Para integración, pero opcional si solo usas webhook
 const { startListener } = require('./listener.js');
 const logger = require('./logger');
 
