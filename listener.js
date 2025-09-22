@@ -1,6 +1,7 @@
 const { ethers } = require('ethers');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
+const logger = require('./logger');
 
 // Inicialización de Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -24,31 +25,34 @@ const isValidBscAddress = (address) => /^0x[a-fA-F0-9]{40}$/.test(address);
 if (!isValidTronAddress(TRON_TREASURY_ADDRESS)) throw new Error('Dirección TRON inválida en .env');
 if (!isValidBscAddress(BSC_TREASURY_ADDRESS)) throw new Error('Dirección BSC inválida en .env');
 
-console.log('🚀 LISTENER PRODUCCIÓN - MAINNET INICIADO');
-console.log(`📍 TRON Treasury: ${TRON_TREASURY_ADDRESS}`);
-console.log(`📍 BSC Treasury: ${BSC_TREASURY_ADDRESS}`);
-
-// Cache de transacciones procesadas
-const processedHashes = new Set();
+logger.info('Listener producción - Mainnet iniciado', {
+    tron_address: TRON_TREASURY_ADDRESS,
+    bsc_address: BSC_TREASURY_ADDRESS
+});
 
 // Configuración flexible para testing
 const CONFIG = {
     TESTING_MODE: process.env.TESTING_MODE === "true",
-    BASE_AMOUNT: process.env.TESTING_MODE === "true" ? 1 : 15, // Base para logs
-    TOLERANCE: 0.01, // Siempre 0.01 para capturar monto único + variaciones
+    BASE_AMOUNT: process.env.TESTING_MODE === "true" ? 1 : 15,
+    TOLERANCE: 0.01,
     POLL_INTERVAL: process.env.TESTING_MODE === "true" ? 5000 : 10000,
     API_TIMEOUT: 15000,
     MAX_API_RETRIES: 3,
+    DEFAULT_EXPIRATION_MINUTES: 15
 };
 
-console.log(`🔧 Modo: ${CONFIG.TESTING_MODE ? '🧪 TESTING' : '🚀 PRODUCCIÓN'}`);
-console.log(`💰 Monto base: ${CONFIG.BASE_AMOUNT} USDT (con ajuste aleatorio ~${CONFIG.BASE_AMOUNT}.00xxx)`);
+logger.info(`Configuración del listener`, {
+    mode: CONFIG.TESTING_MODE ? 'TESTING' : 'PRODUCCIÓN',
+    base_amount: `${CONFIG.BASE_AMOUNT} USDT (con ajuste aleatorio)`,
+    tolerance: `${CONFIG.TOLERANCE} USDT`,
+    poll_interval: `${CONFIG.POLL_INTERVAL/1000}s`
+});
 
 /**
  * TRON MAINNET
  */
 async function checkTronPayments() {
-    console.log(`[TRON] 🔍 Verificando pagos ${CONFIG.TESTING_MODE ? `(Testing: ~${CONFIG.BASE_AMOUNT}.00xxx USDT)` : '(Producción)'}...`);
+    logger.info(`[TRON] Verificando pagos ${CONFIG.TESTING_MODE ? `(Testing: ~${CONFIG.BASE_AMOUNT}.00xxx USDT)` : '(Producción)'}`);
     
     try {
         const { data: pendingOrders, error } = await supabase
@@ -58,19 +62,16 @@ async function checkTronPayments() {
 
         if (error) throw error;
         if (!pendingOrders?.length) {
-            console.log('[TRON] ⚪ Sin órdenes pendientes');
+            logger.info('[TRON] Sin órdenes pendientes');
             return;
         }
 
-        // Filtrar solo órdenes válidas (todas en producción; en testing, todas ya que montos ~1.xx)
-        const validOrders = pendingOrders; // No filtro extra; usa tolerancia para unicidad
-
+        const validOrders = pendingOrders;
         if (validOrders.length === 0) {
-            console.log(`[TRON] ⚠️ No hay órdenes pendientes`);
+            logger.warn('[TRON] No hay órdenes pendientes válidas');
             return;
         }
 
-        // APIs de mainnet
         const apis = [
             {
                 name: 'TronScan Mainnet',
@@ -93,7 +94,7 @@ async function checkTronPayments() {
             let retries = 0;
             while (retries < CONFIG.MAX_API_RETRIES) {
                 try {
-                    console.log(`[TRON] 🌐 ${api.name} (Intento ${retries + 1})...`);
+                    logger.info(`[TRON] Consultando ${api.name} (Intento ${retries + 1})`);
                     
                     const response = await fetch(api.url, {
                         headers: {
@@ -106,7 +107,7 @@ async function checkTronPayments() {
                     });
 
                     if (!response.ok) {
-                        console.log(`[TRON] ❌ ${api.name}: ${response.status}`);
+                        logger.warn(`[TRON] Error en ${api.name}`, { status: response.status });
                         retries++;
                         continue;
                     }
@@ -115,33 +116,42 @@ async function checkTronPayments() {
                     const transactions = api.parser(data);
                     
                     if (transactions.length > 0) {
-                        console.log(`[TRON] ✅ ${api.name}: ${transactions.length} transacciones`);
+                        logger.info(`[TRON] ${api.name}: ${transactions.length} transacciones encontradas`);
                         
                         for (const tx of transactions) {
-                            if (processedHashes.has(tx.hash)) {
-                                console.log(`[TRON] ⏭️ Ya procesada: ${tx.hash}`);
+                            const { data: existingTx, error: txError } = await supabase
+                                .from('payment_orders')
+                                .select('id')
+                                .eq('transaction_hash', tx.hash)
+                                .single();
+
+                            if (txError && txError.code !== 'PGRST116') {
+                                logger.error('[TRON] Error verificando hash existente', { hash: tx.hash, error: txError.message });
+                                continue;
+                            }
+
+                            if (existingTx) {
+                                logger.warn('[TRON] Hash ya procesado, omitiendo', { hash: tx.hash });
                                 continue;
                             }
                             
-                            console.log(`[TRON] 🔍 Verificando: ${tx.amount} USDT`);
+                            logger.info(`[TRON] Verificando transacción: ${tx.amount} USDT`, { hash: tx.hash });
                             
                             const matchingOrder = validOrders.find(order => 
                                 Math.abs(order.amount - tx.amount) < CONFIG.TOLERANCE
                             );
 
                             if (matchingOrder) {
-                                console.log(`[TRON] 🎉 PAGO DETECTADO!`);
-                                console.log(`   💰 Monto: ${tx.amount} USDT (coincide con orden ${matchingOrder.amount})`);
-                                console.log(`   👤 Usuario: ${matchingOrder.user_id}`);
-                                console.log(`   🆔 Orden: ${matchingOrder.id}`);
-                                console.log(`   🔗 Hash: ${tx.hash}`);
+                                logger.info(`[TRON] Pago detectado para orden ${matchingOrder.id}`, {
+                                    amount: tx.amount,
+                                    user_id: matchingOrder.user_id,
+                                    hash: tx.hash
+                                });
                                 
-                                processedHashes.add(tx.hash);
                                 await activateUser(matchingOrder.user_id, tx.hash, 'TRON', tx.amount);
-                                
                                 await sendPaymentNotification(matchingOrder, tx, 'TRON');
                             } else {
-                                console.log(`[TRON] ❌ Sin coincidencia para ${tx.amount} USDT (tolerancia ${CONFIG.TOLERANCE})`);
+                                logger.warn(`[TRON] Sin coincidencia para ${tx.amount} USDT`, { hash: tx.hash });
                             }
                         }
                         
@@ -149,17 +159,17 @@ async function checkTronPayments() {
                     }
                     break;
                 } catch (apiError) {
-                    console.log(`[TRON] ❌ Error ${api.name} (Intento ${retries + 1}): ${apiError.message}`);
+                    logger.warn(`[TRON] Error en ${api.name} (Intento ${retries + 1})`, { error: apiError.message });
                     retries++;
                     if (retries >= CONFIG.MAX_API_RETRIES) break;
                 }
             }
         }
 
-        console.log('[TRON] 📭 No se encontraron transacciones en ninguna API');
+        logger.info('[TRON] No se encontraron transacciones en ninguna API');
 
     } catch (error) {
-        console.error('[TRON] 💥 Error general:', error.message);
+        logger.error('[TRON] Error general en verificación de pagos', { error: error.message });
     }
 }
 
@@ -167,10 +177,10 @@ async function checkTronPayments() {
  * BSC MAINNET
  */
 async function checkBscPayments() {
-    console.log(`[BSC] 🔍 Verificando pagos ${CONFIG.TESTING_MODE ? `(Testing: ~${CONFIG.BASE_AMOUNT}.00xxx USDT)` : '(Producción)'}...`);
+    logger.info(`[BSC] Verificando pagos ${CONFIG.TESTING_MODE ? `(Testing: ~${CONFIG.BASE_AMOUNT}.00xxx USDT)` : '(Producción)'}`);
 
     if (!ETHERSCAN_API_KEY) {
-        console.log('[BSC] ❌ ETHERSCAN_API_KEY requerida');
+        logger.error('[BSC] ETHERSCAN_API_KEY requerida');
         return;
     }
 
@@ -182,14 +192,13 @@ async function checkBscPayments() {
             
         if (error) throw error;
         if (!pendingOrders?.length) {
-            console.log('[BSC] ⚪ Sin órdenes pendientes');
+            logger.info('[BSC] Sin órdenes pendientes');
             return;
         }
 
-        const validOrders = pendingOrders; // No filtro extra; usa tolerancia
-
+        const validOrders = pendingOrders;
         if (validOrders.length === 0) {
-            console.log(`[BSC] ⚠️ No hay órdenes pendientes`);
+            logger.warn('[BSC] No hay órdenes pendientes válidas');
             return;
         }
 
@@ -200,35 +209,49 @@ async function checkBscPayments() {
         
         const data = await response.json();
         if (data.status === "1" && data.result?.length > 0) {
-            console.log(`[BSC] ✅ ${data.result.length} transacciones encontradas`);
+            logger.info(`[BSC] ${data.result.length} transacciones encontradas`);
             
             for (const tx of data.result) {
-                if (processedHashes.has(tx.hash)) continue;
+                const { data: existingTx, error: txError } = await supabase
+                    .from('payment_orders')
+                    .select('id')
+                    .eq('transaction_hash', tx.hash)
+                    .single();
+
+                if (txError && txError.code !== 'PGRST116') {
+                    logger.error('[BSC] Error verificando hash existente', { hash: tx.hash, error: txError.message });
+                    continue;
+                }
+
+                if (existingTx) {
+                    logger.warn('[BSC] Hash ya procesado, omitiendo', { hash: tx.hash });
+                    continue;
+                }
                 
                 const amount = parseFloat(ethers.formatUnits(tx.value, parseInt(tx.tokenDecimal || 18)));
                 
-                console.log(`[BSC] 🔍 Verificando: ${amount} ${tx.tokenSymbol}`);
+                logger.info(`[BSC] Verificando transacción: ${amount} ${tx.tokenSymbol}`, { hash: tx.hash });
                 
                 const matchingOrder = validOrders.find(order => 
                     Math.abs(order.amount - amount) < CONFIG.TOLERANCE
                 );
                 
                 if (matchingOrder) {
-                    console.log(`[BSC] 🎉 PAGO DETECTADO!`);
-                    console.log(`   💰 Monto: ${amount} ${tx.tokenSymbol} (coincide con orden ${matchingOrder.amount})`);
-                    console.log(`   👤 Usuario: ${matchingOrder.user_id}`);
-                    console.log(`   🔗 Hash: ${tx.hash}`);
+                    logger.info(`[BSC] Pago detectado para orden ${matchingOrder.id}`, {
+                        amount: amount,
+                        user_id: matchingOrder.user_id,
+                        hash: tx.hash
+                    });
                     
-                    processedHashes.add(tx.hash);
                     await activateUser(matchingOrder.user_id, tx.hash, 'BSC', amount);
                     await sendPaymentNotification(matchingOrder, { hash: tx.hash, amount }, 'BSC');
                 }
             }
         } else {
-            console.log('[BSC] 📭 No hay transacciones recientes');
+            logger.info('[BSC] No hay transacciones recientes');
         }
     } catch (error) {
-        console.error('[BSC] 💥 Error:', error.message);
+        logger.error('[BSC] Error en verificación de pagos', { error: error.message });
     }
 }
 
@@ -273,7 +296,7 @@ function parseTronGridResponse(data) {
  */
 async function activateUser(userId, transactionHash, network, amount) {
     const startTime = Date.now();
-    console.log(`🔄 ACTIVANDO USUARIO ${userId} (${network})...`);
+    logger.info(`Activando usuario ${userId} en ${network}`);
     
     try {
         const { data: currentUser, error: fetchError } = await supabase
@@ -285,7 +308,7 @@ async function activateUser(userId, transactionHash, network, amount) {
         if (fetchError) throw fetchError;
 
         if (currentUser?.status === 'activo') {
-            console.log(`⚠️ Usuario ${userId} ya activo`);
+            logger.warn(`Usuario ${userId} ya está activo`, { username: currentUser.username });
             return;
         }
 
@@ -310,13 +333,16 @@ async function activateUser(userId, transactionHash, network, amount) {
         if (orderError) throw orderError;
 
         const duration = Date.now() - startTime;
-        console.log(`✅ ACTIVACIÓN EXITOSA (${duration}ms)`);
-        console.log(`   👤 Usuario: ${currentUser.username} (ID: ${userId})`);
-        console.log(`   💰 Pago: ${amount} USDT via ${network}`);
-        console.log(`   🔗 Hash: ${transactionHash}`);
+        logger.info(`Activación exitosa para usuario ${userId}`, {
+            username: currentUser.username,
+            amount: amount,
+            network: network,
+            hash: transactionHash,
+            duration_ms: duration
+        });
 
     } catch (error) {
-        console.error(`❌ ERROR ACTIVANDO USUARIO ${userId}:`, error.message);
+        logger.error(`Error activando usuario ${userId}`, { error: error.message });
     }
 }
 
@@ -325,9 +351,36 @@ async function activateUser(userId, transactionHash, network, amount) {
  */
 async function sendPaymentNotification(order, transaction, network) {
     try {
-        console.log(`📧 Notificación: Pago recibido - Usuario ${order.user_id}, ${transaction.amount} USDT via ${network}`);
+        logger.info(`Notificación: Pago recibido para usuario ${order.user_id}`, {
+            amount: transaction.amount,
+            network: network,
+            hash: transaction.hash
+        });
     } catch (error) {
-        console.log('⚠️ Error enviando notificación:', error.message);
+        logger.error('Error enviando notificación', { error: error.message });
+    }
+}
+
+/**
+ * Marcar órdenes expiradas
+ */
+async function markExpiredOrders() {
+    try {
+        const fifteenMinutesAgo = new Date(Date.now() - CONFIG.DEFAULT_EXPIRATION_MINUTES * 60 * 1000);
+        
+        const { data, error } = await supabase
+            .from('payment_orders')
+            .update({ status: 'expired' })
+            .eq('status', 'pending')
+            .lt('created_at', fifteenMinutesAgo.toISOString());
+        
+        if (error) throw error;
+
+        if (data && data.length > 0) {
+            logger.info(`${data.length} órdenes marcadas como expiradas`);
+        }
+    } catch (error) {
+        logger.error('Error marcando órdenes expiradas', { error: error.message });
     }
 }
 
@@ -335,40 +388,38 @@ async function sendPaymentNotification(order, transaction, network) {
  * Función principal del listener
  */
 function startListener() {
-    const mode = CONFIG.TESTING_MODE ? 'TESTING' : 'PRODUCCIÓN';
-    console.log(`\n🚀 INICIANDO LISTENER - MODO ${mode}`);
-    console.log(`⏰ Intervalo: ${CONFIG.POLL_INTERVAL/1000}s`);
-    console.log(`💰 Monto base: ${CONFIG.BASE_AMOUNT} USDT (con ajuste aleatorio)`);
-    console.log(`🎯 Tolerancia: ${CONFIG.TOLERANCE} USDT`);
+    logger.info(`Iniciando Listener en modo ${CONFIG.TESTING_MODE ? 'TESTING' : 'PRODUCCIÓN'}`, {
+        interval: `${CONFIG.POLL_INTERVAL/1000}s`,
+        base_amount: `${CONFIG.BASE_AMOUNT} USDT`,
+        tolerance: `${CONFIG.TOLERANCE} USDT`
+    });
     
     const runChecks = async () => {
         const cycleStart = Date.now();
-        console.log('\n' + '='.repeat(50));
-        console.log(`🔄 CICLO ${mode} - ${new Date().toISOString()}`);
-        console.log('='.repeat(50));
+        logger.info(`Iniciando nuevo ciclo de verificación`);
         
         await Promise.allSettled([
+            markExpiredOrders(),
             checkTronPayments(),
             checkBscPayments()
         ]);
         
         const cycleDuration = Date.now() - cycleStart;
-        console.log(`⏱️ Ciclo completado en ${cycleDuration}ms`);
-        console.log('='.repeat(50) + '\n');
+        logger.info(`Ciclo completado`, { duration_ms: cycleDuration });
     };
 
     setTimeout(runChecks, 5000);
     setInterval(runChecks, CONFIG.POLL_INTERVAL);
     
-    console.log(`✅ Listener ${mode} iniciado correctamente!`);
+    logger.info(`Listener iniciado correctamente`);
 }
 
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('💥 Unhandled Rejection:', reason);
+    logger.error('Unhandled Rejection', { reason: reason.message || reason });
 });
 
 process.on('uncaughtException', (error) => {
-    console.error('💥 Uncaught Exception:', error);
+    logger.error('Uncaught Exception', { error: error.message });
 });
 
 module.exports = { startListener };
