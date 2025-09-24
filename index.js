@@ -112,35 +112,51 @@ app.post('/register', async (req, res) => {
 
         // Llamada a la función RPC de Supabase para la transacción
         const { data, error } = await supabase.rpc('create_user_and_order', {
-            p_email: email,
-            p_username: username,
-            p_password_hash: password_hash,
-            p_first_name: first_name,
-            p_last_name: last_name,
-            p_country: country,
-            p_referral_code: newUserReferralCode,
-            p_parent_ref_code: referral_code,            // <- usar este nombre
-            p_base_amount: Number(CONFIG.BASE_AMOUNT)
+          p_email: email,
+          p_username: username,
+          p_password_hash: password_hash,
+          p_first_name: first_name,
+          p_last_name: last_name,
+          p_country: country,
+          p_referral_code: newUserReferralCode,
+          p_original_referrer_code: referral_code,
+          p_base_amount: Number(CONFIG.BASE_AMOUNT)
         });
 
         if (error) {
-            if (error.message.includes('parent_not_found')) {
-                logger.warnWithContext('Código de referido inválido', { referral_code });
-                return res.status(404).json({ error: 'Código de referido inválido.', error_code: 'REG_INVALID_REF' });
-            }
-            if (error.message.includes('user_exists')) {
-                logger.warnWithContext('Usuario ya existe', { email, username });
-                return res.status(400).json({ error: 'El email o username ya está en uso.', error_code: 'REG_USER_EXISTS' });
-            }
-            throw error;
+          const msg = String(error.message || '');
+
+          if (msg.includes('parent_not_found')) {
+            logger.warnWithContext('Código de referido inválido', { referral_code });
+            return res.status(404).json({ error: 'Código de referido inválido.', error_code: 'REG_INVALID_REF' });
+          }
+          if (msg.includes('user_exists_email')) {
+            logger.warnWithContext('Email ya en uso', { email });
+            return res.status(400).json({ error: 'El email ya está en uso.', error_code: 'REG_EMAIL_EXISTS' });
+          }
+          if (msg.includes('user_exists_username')) {
+            logger.warnWithContext('Username ya en uso', { username });
+            return res.status(400).json({ error: 'El username ya está en uso.', error_code: 'REG_USERNAME_EXISTS' });
+          }
+          if (msg.includes('user_exists_referral')) {
+            logger.warnWithContext('Colisión de referral_code generado', { generated: newUserReferralCode });
+            return res.status(409).json({ error: 'Conflicto al generar el código de referido. Intenta de nuevo.', error_code: 'REG_REFERRAL_COLLISION' });
+          }
+
+          logger.errorWithCode('RPC create_user_and_order falló', 'REG_RPC_ERR', {
+            message: error.message, details: error.details, hint: error.hint, code: error.code
+          });
+          return res.status(500).json({ error: 'Error interno del servidor.', error_code: 'REG_RPC_ERR' });
         }
 
-        logger.infoWithContext('Usuario y orden creados exitosamente', { userId: data.user_id, orderId: data.order_id });
-        
-        res.status(201).json({ 
-            message: 'Usuario creado exitosamente', 
-            userId: data.user_id,
-            orderId: data.order_id 
+        const row = Array.isArray(data) ? data[0] : data;
+
+        logger.infoWithContext('Usuario y orden creados exitosamente', { userId: row.user_id, orderId: row.order_id });
+
+        res.status(201).json({
+          message: 'Usuario creado exitosamente',
+          userId: row.user_id,
+          orderId: row.order_id
         });
 
     } catch (error) {
