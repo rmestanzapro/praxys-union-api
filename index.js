@@ -203,47 +203,59 @@ app.get('/api/checkout-details/:orderId', async (req, res) => {
             .select('amount, created_at')
             .eq('id', orderId)
             .single();
+
         if (error || !order) {
             logger.warnWithContext('Orden no encontrada en checkout-details', { orderId });
             return res.status(404).json({ error: 'Orden no encontrada.', error_code: 'CHECKOUT_NOT_FOUND' });
         }
 
         const uniqueAmount = Number(order.amount);
-        if (uniqueAmount <= 0) {
+        if (!uniqueAmount || uniqueAmount <= 0) {
             logger.errorWithCode('Monto inválido en checkout-details', 'CHECKOUT_INVALID_AMOUNT', { orderId, amount: uniqueAmount });
-            throw new Error('Monto inválido.');
+            return res.status(500).json({ error: 'Monto inválido.', error_code: 'CHECKOUT_INVALID_AMOUNT' });
         }
 
-        const network = order.network || CONFIG.DEFAULT_NETWORK;
-        const address = network === 'tron' ? TRON_ADDRESS : BSC_ADDRESS;
-        const explorerBase =
-            network === 'tron'
-                ? 'https://tronscan.org/#/transaction/'
-                : 'https://bscscan.com/tx/';
-
-        if (network === 'tron' && !isValidTronAddress(address)) {
-            logger.errorWithCode('Dirección TRON inválida', 'CHECKOUT_INVALID_TRON_ADDRESS', { address });
-            throw new Error('Dirección TRON inválida.');
-        } else if (network === 'bsc' && !isValidBscAddress(address)) {
-            logger.errorWithCode('Dirección BSC inválida', 'CHECKOUT_INVALID_BSC_ADDRESS', { address });
-            throw new Error('Dirección BSC inválida.');
-        }
-
+        // Expiración
         const createdAt = new Date(order.created_at);
         const expiresAt = new Date(createdAt.getTime() + CONFIG.DEFAULT_EXPIRATION_MINUTES * 60 * 1000).toISOString();
 
-        logger.infoWithContext(`[CHECKOUT-DETAILS] Orden ${orderId}: ${uniqueAmount.toFixed(6)} USDT ${CONFIG.TESTING_MODE ? '(Testing)' : '(Producción)'}`);
+        // Validar direcciones de ambas redes
+        if (!TRON_ADDRESS || !isValidTronAddress(TRON_ADDRESS)) {
+            logger.errorWithCode('Dirección TRON inválida o ausente', 'CHECKOUT_INVALID_TRON_ADDRESS', { TRON_ADDRESS });
+            return res.status(500).json({ error: 'Dirección TRON inválida.', error_code: 'CHECKOUT_INVALID_TRON_ADDRESS' });
+        }
+        if (!BSC_ADDRESS || !isValidBscAddress(BSC_ADDRESS)) {
+            logger.errorWithCode('Dirección BSC inválida o ausente', 'CHECKOUT_INVALID_BSC_ADDRESS', { BSC_ADDRESS });
+            return res.status(500).json({ error: 'Dirección BSC inválida.', error_code: 'CHECKOUT_INVALID_BSC_ADDRESS' });
+        }
 
-        res.status(200).json({
-            uniqueAmount: uniqueAmount.toFixed(6),
-            network,
-            address,
-            explorerBase,
-            expiresAt,
-            symbol: 'USDT',
-            color: network === 'tron' ? 'text-red-500' : 'text-yellow-500',
-            badgeClass: network === 'tron' ? 'bg-red-500/15 border border-red-500/40' : 'bg-yellow-500/15 border border-yellow-500/40',
+        // Helper para armar el payload por red
+        const buildNetworkPayload = (network) => {
+            const isTron = network === 'tron';
+            return {
+                uniqueAmount: uniqueAmount.toFixed(6),
+                network,
+                address: isTron ? TRON_ADDRESS : BSC_ADDRESS,
+                explorerBase: isTron ? 'https://tronscan.org/#/transaction/' : 'https://bscscan.com/tx/',
+                expiresAt,
+                symbol: 'USDT',
+                color: isTron ? 'text-red-500' : 'text-yellow-500',
+                badgeClass: isTron
+                    ? 'bg-red-500/15 border border-red-500/40'
+                    : 'bg-yellow-500/15 border border-yellow-500/40',
+            };
+        };
+
+        const tron = buildNetworkPayload('tron');
+        const bsc = buildNetworkPayload('bsc');
+
+        logger.infoWithContext(`[CHECKOUT-DETAILS] Orden ${orderId}: ${uniqueAmount.toFixed(6)} USDT para TRON y BSC`, {
+            tron_address: tron.address,
+            bsc_address: bsc.address
         });
+
+        // Devolver ambas redes
+        res.status(200).json({ tron, bsc });
     } catch (error) {
         logger.errorWithCode('Error en checkout-details', 'CHECKOUT_ERR_001', { orderId, error: error.message });
         res.status(500).json({ error: 'Error interno del servidor.', error_code: 'CHECKOUT_ERR_001' });
