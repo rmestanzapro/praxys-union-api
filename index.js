@@ -119,7 +119,7 @@ app.post('/register', async (req, res) => {
             p_last_name: last_name,
             p_country: country,
             p_referral_code: newUserReferralCode,
-            p_original_referrer_code: referral_code,
+            p_parent_ref_code: referral_code,            // <- usar este nombre
             p_base_amount: Number(CONFIG.BASE_AMOUNT)
         });
 
