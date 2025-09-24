@@ -214,9 +214,12 @@ app.get('/api/checkout-details/:orderId', async (req, res) => {
             throw new Error('Monto inválido.');
         }
 
-        const network = CONFIG.DEFAULT_NETWORK;
+        const network = order.network || CONFIG.DEFAULT_NETWORK;
         const address = network === 'tron' ? TRON_ADDRESS : BSC_ADDRESS;
-        const explorerBase = network === 'tron' ? 'https://tronscan.org/#/transaction/' : 'https://bscscan.com/tx/';
+        const explorerBase =
+            network === 'tron'
+                ? 'https://tronscan.org/#/transaction/'
+                : 'https://bscscan.com/tx/';
 
         if (network === 'tron' && !isValidTronAddress(address)) {
             logger.errorWithCode('Dirección TRON inválida', 'CHECKOUT_INVALID_TRON_ADDRESS', { address });
