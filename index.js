@@ -266,6 +266,7 @@ app.get('/api/payment-status/:orderId', async (req, res) => {
         res.status(200).json({
             status,
             txHash: order.transaction_hash || null,
+            network: order.network || null, // ✅ añadimos red detectada
         });
     } catch (error) {
         logger.errorWithCode('Error en payment-status', 'PAYMENT_STATUS_ERR_001', { orderId, error: error.message });
