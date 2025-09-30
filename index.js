@@ -97,7 +97,7 @@ app.get('/api/referrer-info', async (req, res) => {
 
 // Endpoint de registro
 app.post('/register', async (req, res) => {
-    const { email, password, username, first_name, last_name, country, referral_code } = req.body;
+    const { email, password, username, first_name, last_name, country, referral_code, contribution } = req.body;
 
     // Validación adicional para referral_code
     if (!referral_code || referral_code.trim() === '') {
@@ -130,7 +130,8 @@ app.post('/register', async (req, res) => {
           p_country: country,
           p_referral_code: newUserReferralCode,
           p_original_referrer_code: referral_code,
-          p_base_amount: Number(CONFIG.BASE_AMOUNT)
+          p_base_amount: Number(CONFIG.BASE_AMOUNT),
+          p_contribution: contribution
         });
 
         if (error) {
