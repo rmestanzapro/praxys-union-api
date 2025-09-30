@@ -98,7 +98,17 @@ app.get('/api/referrer-info', async (req, res) => {
 // Endpoint de registro
 app.post('/register', async (req, res) => {
     const { email, password, username, first_name, last_name, country, referral_code } = req.body;
-    if (!email || !password || !username || !referral_code || !first_name || !last_name || !country) {
+
+    // Validación adicional para referral_code
+    if (!referral_code || referral_code.trim() === '') {
+        logger.warnWithContext('Código de referido vacío o no proporcionado en registro', { email, username });
+        return res.status(400).json({
+            error: 'Código de referido es requerido.',
+            error_code: 'REG_INVALID_REF'
+        });
+    }
+
+    if (!email || !password || !username || !first_name || !last_name || !country) {
         logger.warnWithContext('Campos incompletos en registro', { email, username, referral_code });
         return res.status(400).json({ error: 'Todos los campos son requeridos.', error_code: 'REG_FIELDS_MISSING' });
     }
