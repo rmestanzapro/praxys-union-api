@@ -328,6 +328,45 @@ app.get('/me/tree', authenticateToken, async (req, res) => {
     }
 });
 
+// Endpoint para status del usuario (protegido)
+app.get('/api/me', authenticateToken, async (req, res) => {
+  const userId = req.user.userId;
+  
+  try {
+    // Fetch status del usuario
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('status')
+      .eq('id', userId)
+      .single();
+    
+    if (userError) throw userError;
+
+    // Si pendiente, fetch última orden
+    let orders = [];
+    if (user.status === 'pendiente') {
+      const { data: orderData, error: orderError } = await supabase
+        .from('payment_orders')
+        .select('id, status')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      
+      if (orderError) throw orderError;
+      orders = orderData || [];
+    }
+
+    logger.infoWithContext('Status del usuario obtenido', { userId, status: user.status });
+    res.status(200).json({ 
+      status: user.status,
+      orders  // Array con última orden (o vacío)
+    });
+  } catch (error) {
+    logger.errorWithCode('Error en /api/me', 'ME_ERR_001', { userId, error: error.message });
+    res.status(500).json({ error: 'Error interno.', error_code: 'ME_ERR_001' });
+  }
+});
+
 // Rutas de prueba
 app.get('/test-db', async (req, res) => {
     try {
