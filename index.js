@@ -51,15 +51,27 @@ const limiter = rateLimit({
 app.use('/register', limiter);
 app.use('/login', limiter);
 
-// Middleware de autenticación
-function authenticateToken(req, res, next) {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (token == null) {
+// Middleware de autenticación (acepta Supabase JWT o token propio legado)
+async function authenticateToken(req, res, next) {
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if (!token) {
         logger.warnWithContext('Intento de acceso sin token', { path: req.path });
         return res.status(401).json({ error: 'Token requerido.', error_code: 'AUTH_NO_TOKEN' });
     }
 
+    // 1) Intentar validación con Supabase (token de sesión de signInWithIdToken)
+    try {
+        const { data, error } = await supabase.auth.getUser(token);
+        if (!error && data?.user) {
+            req.user = { userId: data.user.id, email: data.user.email };
+            return next();
+        }
+    } catch (e) {
+        // seguir al fallback
+    }
+
+    // 2) Fallback al JWT propio legado (si aún se usa /login con contraseña)
     jwt.verify(token, jwtSecret, (err, user) => {
         if (err) {
             logger.warnWithContext('Token inválido o expirado', { path: req.path });
