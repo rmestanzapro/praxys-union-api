@@ -300,9 +300,6 @@ async function checkBscPayments() {
                     logger.error('[BSC] Error en verificación de pagos', { error: error.message });
                 }
             }
-        } else {
-            logger.info('[BSC] No hay transacciones recientes');
-            pollingFailed = false;
         }
     } catch (error) {
         logger.error('[BSC] Error en verificación de pagos', { error: error.message });
