@@ -132,7 +132,7 @@ app.post('/auth/exists', async (req, res) => {
 
 // Endpoint de registro
 app.post('/register', async (req, res) => {
-    const { email, password, username, first_name, last_name, country, referral_code, contribution } = req.body;
+    const { email, username, first_name, last_name, country, referral_code, contribution } = req.body;
 
     // Validación adicional para referral_code
     if (!referral_code || referral_code.trim() === '') {
@@ -143,14 +143,16 @@ app.post('/register', async (req, res) => {
         });
     }
 
-    if (!email || !password || !username || !first_name || !last_name || !country) {
+    if (!email || !username || !first_name || !last_name || !country) {
         logger.warnWithContext('Campos incompletos en registro', { email, username, referral_code });
         return res.status(400).json({ error: 'Todos los campos son requeridos.', error_code: 'REG_FIELDS_MISSING' });
     }
 
     try {
+        // Generar una contraseña interna segura (no expuesta al usuario) para mantener compatibilidad de esquema
+        const internalPassword = crypto.randomBytes(24).toString('base64');
         const salt = await bcrypt.genSalt(10);
-        const password_hash = await bcrypt.hash(password, salt);
+        const password_hash = await bcrypt.hash(internalPassword, salt);
         const newUserReferralCode = `${username.toUpperCase()}${Math.random().toString(36).substring(2, 8)}`;
 
         logger.infoWithContext('Iniciando registro para usuario', { email, username });
