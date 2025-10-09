@@ -27,6 +27,25 @@ const CONFIG = {
     DEFAULT_EXPIRATION_MINUTES: 15,
 };
 
+// Tier mapping by contribution amount (USDT)
+function resolveGroupName(amount, testing = false) {
+    const a = Number(amount || 0);
+    if (testing) {
+        if (a === 1) return 'Test';
+    }
+    // Production tiers
+    if (a === 15) return 'Starter';
+    if (a === 50) return 'Pro';
+    if (a === 100) return 'Elite';
+    if (a === 500) return 'Diamond';
+    if (a === 1000) return 'Infinity Bronze';
+    if (a === 2500) return 'Infinity Silver';
+    if (a === 4500) return 'Infinity Gold';
+    if (a === 7000) return 'Praxys Prime';
+    if (a > 7000) return 'Praxys Prime'; // Future amounts beyond current top still map to Prime
+    return 'general';
+}
+
 // Direcciones de treasury desde .env
 const TRON_ADDRESS = process.env.TRON_TREASURY_ADDRESS;
 const BSC_ADDRESS = process.env.BSC_TREASURY_ADDRESS;
@@ -198,6 +217,14 @@ app.post('/register', async (req, res) => {
         }
 
         const row = Array.isArray(data) ? data[0] : data;
+
+        // Set group_name according to contribution tier
+        try {
+            const groupName = resolveGroupName(contribution, CONFIG.TESTING_MODE);
+            await supabase.from('users').update({ group_name: groupName }).eq('id', row.user_id);
+        } catch (e) {
+            logger.warnWithContext('No se pudo actualizar group_name post-registro', { error: e.message, userId: row.user_id });
+        }
 
         logger.infoWithContext('Usuario y orden creados exitosamente', { userId: row.user_id, orderId: row.order_id });
 
@@ -373,7 +400,7 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     // Fetch status del usuario
     const { data: user, error: userError } = await supabase
       .from('users')
-      .select('status')
+            .select('status, group_name')
       .eq('id', userId)
       .single();
     
@@ -393,10 +420,11 @@ app.get('/api/me', authenticateToken, async (req, res) => {
       orders = orderData || [];
     }
 
-    logger.infoWithContext('Status del usuario obtenido', { userId, status: user.status });
+        logger.infoWithContext('Status del usuario obtenido', { userId, status: user.status, group_name: user.group_name });
     res.status(200).json({ 
       status: user.status,
-      orders  // Array con última orden (o vacío)
+            group_name: user.group_name || null,
+            orders  // Array con última orden (o vacío)
     });
   } catch (error) {
     logger.errorWithCode('Error en /api/me', 'ME_ERR_001', { userId, error: error.message });
