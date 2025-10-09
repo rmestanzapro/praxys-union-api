@@ -364,6 +364,34 @@ app.get('/api/payment-status/:orderId', async (req, res) => {
     }
 });
 
+// Crear una nueva orden de pago (protegido)
+app.post('/api/new-order', authenticateToken, async (req, res) => {
+    const userId = req.user.userId;
+    try {
+        // Generar un monto único: base + sufijo pequeño para identificación automática
+        const base = Number(CONFIG.BASE_AMOUNT);
+        const suffix = Math.floor(Math.random() * 900 + 100) / 1_000_000; // 0.000100 - 0.001000
+        const amount = Number((base + suffix).toFixed(6));
+
+        const { data, error } = await supabase
+            .from('payment_orders')
+            .insert({ user_id: userId, amount, status: 'pending' })
+            .select('id')
+            .single();
+
+        if (error) {
+            logger.errorWithCode('Error creando nueva orden', 'NEW_ORDER_ERR_001', { userId, error: error.message });
+            return res.status(500).json({ error: 'No se pudo crear la orden.', error_code: 'NEW_ORDER_ERR_001' });
+        }
+
+        logger.infoWithContext('Nueva orden creada', { userId, orderId: data.id, amount });
+        return res.status(201).json({ orderId: data.id });
+    } catch (e) {
+        logger.errorWithCode('Excepción en new-order', 'NEW_ORDER_ERR_002', { userId, error: e.message });
+        return res.status(500).json({ error: 'Error interno.', error_code: 'NEW_ORDER_ERR_002' });
+    }
+});
+
 // NUEVO: Endpoint para webhook de Moralis (backup)
 app.post('/webhook', express.json({ limit: '2mb' }), async (req, res) => {
     const body = req.body;
