@@ -107,6 +107,29 @@ app.get('/api/referrer-info', async (req, res) => {
     }
 });
 
+// Endpoint: verificar si un usuario existe (por email)
+app.post('/auth/exists', async (req, res) => {
+    const { email } = req.body || {};
+    if (!email) {
+        return res.status(400).json({ error: 'Email requerido.', error_code: 'AUTH_EMAIL_REQUIRED' });
+    }
+    try {
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('id, status')
+            .eq('email', email)
+            .single();
+
+        if (error || !user) {
+            return res.status(200).json({ exists: false });
+        }
+        return res.status(200).json({ exists: true, status: user.status || null });
+    } catch (err) {
+        logger.errorWithCode('Error en auth/exists', 'AUTH_EXISTS_ERR_001', { error: err.message, email });
+        return res.status(500).json({ error: 'Error interno del servidor.', error_code: 'AUTH_EXISTS_ERR_001' });
+    }
+});
+
 // Endpoint de registro
 app.post('/register', async (req, res) => {
     const { email, password, username, first_name, last_name, country, referral_code, contribution } = req.body;
