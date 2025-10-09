@@ -392,6 +392,29 @@ app.post('/api/new-order', authenticateToken, async (req, res) => {
     }
 });
 
+// Intercambiar token de Supabase por JWT propio (para llamadas al API)
+app.post('/api/auth/exchange', async (req, res) => {
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if (!token) {
+        return res.status(400).json({ error: 'Token requerido.', error_code: 'AUTH_NO_TOKEN' });
+    }
+    try {
+        const { data, error } = await supabase.auth.getUser(token);
+        if (error || !data?.user) {
+            logger.warnWithContext('Intercambio de token fallido: Supabase no validó', { error: error?.message });
+            return res.status(403).json({ error: 'Token inválido.', error_code: 'AUTH_INVALID_SUPABASE_TOKEN' });
+        }
+        const payload = { userId: data.user.id, email: data.user.email };
+        const apiToken = jwt.sign(payload, jwtSecret, { expiresIn: '24h' });
+        logger.infoWithContext('Token intercambiado correctamente', { userId: data.user.id });
+        return res.status(200).json({ token: apiToken });
+    } catch (e) {
+        logger.errorWithCode('Error en auth/exchange', 'AUTH_EXCHANGE_ERR', { error: e.message });
+        return res.status(500).json({ error: 'Error interno.', error_code: 'AUTH_EXCHANGE_ERR' });
+    }
+});
+
 // NUEVO: Endpoint para webhook de Moralis (backup)
 app.post('/webhook', express.json({ limit: '2mb' }), async (req, res) => {
     const body = req.body;
