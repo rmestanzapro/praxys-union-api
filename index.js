@@ -446,16 +446,33 @@ app.get('/me/tree', authenticateToken, async (req, res) => {
 // Endpoint para status del usuario (protegido)
 app.get('/api/me', authenticateToken, async (req, res) => {
   const userId = req.user.userId;
+    const userEmail = req.user.email;
   
   try {
-    // Fetch status del usuario
-    const { data: user, error: userError } = await supabase
-      .from('users')
-            .select('status, group_name')
-      .eq('id', userId)
-      .single();
-    
-    if (userError) throw userError;
+        // 1) Intentar por id
+        let { data: user, error: userError } = await supabase
+            .from('users')
+            .select('id, status, group_name')
+            .eq('id', userId)
+            .single();
+
+        // 2) Fallback por email si no se encontró por id
+        if (userError || !user) {
+            const byEmail = await supabase
+                .from('users')
+                .select('id, status, group_name')
+                .eq('email', userEmail)
+                .single();
+            user = byEmail.data || null;
+            userError = byEmail.error || null;
+        }
+
+        // Si aún no existe en la tabla de aplicación, devolver 'pendiente' sin órdenes para que el frontend lleve a Lobby
+        if (userError && userError.code === 'PGRST116') {
+            logger.warnWithContext('Usuario no encontrado en tabla de aplicación', { userId, userEmail });
+            return res.status(200).json({ status: 'pendiente', orders: [], group_name: null });
+        }
+        if (userError) throw userError;
 
     // Si pendiente, fetch última orden
     let orders = [];
@@ -471,15 +488,16 @@ app.get('/api/me', authenticateToken, async (req, res) => {
       orders = orderData || [];
     }
 
-        logger.infoWithContext('Status del usuario obtenido', { userId, status: user.status, group_name: user.group_name });
+            logger.infoWithContext('Status del usuario obtenido', { userId, email: userEmail, status: user.status, group_name: user.group_name });
     res.status(200).json({ 
       status: user.status,
             group_name: user.group_name || null,
             orders  // Array con última orden (o vacío)
     });
   } catch (error) {
-    logger.errorWithCode('Error en /api/me', 'ME_ERR_001', { userId, error: error.message });
-    res.status(500).json({ error: 'Error interno.', error_code: 'ME_ERR_001' });
+        logger.errorWithCode('Error en /api/me (soft-fallback a pendiente)', 'ME_ERR_001', { userId, error: error.message });
+        // Fallback amable: devolver "pendiente" para que el frontend redirija a Lobby
+        res.status(200).json({ status: 'pendiente', orders: [], group_name: null });
   }
 });
 
