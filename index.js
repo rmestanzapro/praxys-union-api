@@ -482,18 +482,36 @@ app.get('/api/me', authenticateToken, async (req, res) => {
         }
         if (userError) throw userError;
 
-        // Si pendiente, fetch última orden usando id de app
+            // Si pendiente, fetch última orden usando id de app
         let orders = [];
         if (user && user.status === 'pendiente') {
-            const { data: orderData, error: orderError } = await supabase
+                const { data: orderData, error: orderError } = await supabase
                 .from('payment_orders')
-                .select('id, status')
+                    .select('id, status, created_at')
                 .eq('user_id', user.id)
                 .order('created_at', { ascending: false })
                 .limit(1);
 
             if (orderError) throw orderError;
-            orders = orderData || [];
+                let o = (orderData && orderData[0]) || null;
+                if (o) {
+                    // Determinar expiración por ventana de tiempo aunque la DB no lo haya marcado
+                    if (o.status === 'pending' && o.created_at) {
+                        const createdAt = new Date(o.created_at).getTime();
+                        const expiresAt = createdAt + CONFIG.DEFAULT_EXPIRATION_MINUTES * 60 * 1000;
+                        if (Date.now() >= expiresAt) {
+                            // Intentar marcar como expired en DB (no bloquear si falla)
+                            try {
+                                await supabase.from('payment_orders').update({ status: 'expired' }).eq('id', o.id);
+                                o.status = 'expired';
+                            } catch {}
+                        }
+                    }
+                    // Si está expirado, no forzar a checkout; dejar que el frontend vaya a Lobby
+                    orders = [o];
+                } else {
+                    orders = [];
+                }
         }
 
         logger.infoWithContext('Status del usuario obtenido', { supaUserId, email: userEmail, status: user?.status, group_name: user?.group_name });
