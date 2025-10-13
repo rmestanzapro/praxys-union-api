@@ -366,28 +366,48 @@ app.get('/api/payment-status/:orderId', async (req, res) => {
 
 // Crear una nueva orden de pago (protegido)
 app.post('/api/new-order', authenticateToken, async (req, res) => {
-    const userId = req.user.userId;
+    const supaUserId = req.user.userId; // ID de Supabase Auth
+    const userEmail = req.user.email;
     try {
-        // Generar un monto único: base + sufijo pequeño para identificación automática
+        // 1) Resolver el ID de la tabla de aplicación (users.id) por email
+        const { data: appUser, error: appUserErr } = await supabase
+            .from('users')
+            .select('id')
+            .eq('email', userEmail)
+            .single();
+
+        if (appUserErr || !appUser?.id) {
+            logger.errorWithCode('Usuario de aplicación no encontrado para new-order', 'NEW_ORDER_USER_NOT_FOUND', {
+                supaUserId, userEmail, error: appUserErr?.message
+            });
+            return res.status(404).json({ error: 'Usuario no encontrado.', error_code: 'NEW_ORDER_USER_NOT_FOUND' });
+        }
+
+        const appUserId = appUser.id;
+
+        // 2) Generar un monto único: base + sufijo pequeño para identificación automática
         const base = Number(CONFIG.BASE_AMOUNT);
         const suffix = Math.floor(Math.random() * 900 + 100) / 1_000_000; // 0.000100 - 0.001000
         const amount = Number((base + suffix).toFixed(6));
 
+        // 3) Insertar la orden ligada al usuario de la app (no al ID de Supabase Auth)
         const { data, error } = await supabase
             .from('payment_orders')
-            .insert({ user_id: userId, amount, status: 'pending' })
+            .insert({ user_id: appUserId, amount, status: 'pending' })
             .select('id')
             .single();
 
         if (error) {
-            logger.errorWithCode('Error creando nueva orden', 'NEW_ORDER_ERR_001', { userId, error: error.message });
+            logger.errorWithCode('Error creando nueva orden', 'NEW_ORDER_ERR_001', {
+                appUserId, supaUserId, amount, error: error.message
+            });
             return res.status(500).json({ error: 'No se pudo crear la orden.', error_code: 'NEW_ORDER_ERR_001' });
         }
 
-        logger.infoWithContext('Nueva orden creada', { userId, orderId: data.id, amount });
+        logger.infoWithContext('Nueva orden creada', { appUserId, orderId: data.id, amount });
         return res.status(201).json({ orderId: data.id });
     } catch (e) {
-        logger.errorWithCode('Excepción en new-order', 'NEW_ORDER_ERR_002', { userId, error: e.message });
+        logger.errorWithCode('Excepción en new-order', 'NEW_ORDER_ERR_002', { supaUserId, error: e.message });
         return res.status(500).json({ error: 'Error interno.', error_code: 'NEW_ORDER_ERR_002' });
     }
 });
@@ -474,19 +494,20 @@ app.get('/api/me', authenticateToken, async (req, res) => {
         }
         if (userError) throw userError;
 
-    // Si pendiente, fetch última orden
-    let orders = [];
-    if (user.status === 'pendiente') {
-      const { data: orderData, error: orderError } = await supabase
-        .from('payment_orders')
-        .select('id, status')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false })
-        .limit(1);
-      
-      if (orderError) throw orderError;
-      orders = orderData || [];
-    }
+        // Si pendiente, fetch última orden (usando id de app si está disponible)
+        let orders = [];
+        if (user.status === 'pendiente') {
+            const appUserId = user?.id || userId;
+            const { data: orderData, error: orderError } = await supabase
+                .from('payment_orders')
+                .select('id, status')
+                .eq('user_id', appUserId)
+                .order('created_at', { ascending: false })
+                .limit(1);
+
+            if (orderError) throw orderError;
+            orders = orderData || [];
+        }
 
             logger.infoWithContext('Status del usuario obtenido', { userId, email: userEmail, status: user.status, group_name: user.group_name });
     res.status(200).json({ 
