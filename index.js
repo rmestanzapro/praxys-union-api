@@ -465,43 +465,30 @@ app.get('/me/tree', authenticateToken, async (req, res) => {
 
 // Endpoint para status del usuario (protegido)
 app.get('/api/me', authenticateToken, async (req, res) => {
-  const userId = req.user.userId;
+    const supaUserId = req.user.userId;
     const userEmail = req.user.email;
-  
-  try {
-        // 1) Intentar por id
-        let { data: user, error: userError } = await supabase
+
+    try {
+        // Buscar SIEMPRE por email para evitar mismatch de tipos (uuid vs bigint)
+        const { data: user, error: userError } = await supabase
             .from('users')
             .select('id, status, group_name')
-            .eq('id', userId)
+            .eq('email', userEmail)
             .single();
 
-        // 2) Fallback por email si no se encontró por id
-        if (userError || !user) {
-            const byEmail = await supabase
-                .from('users')
-                .select('id, status, group_name')
-                .eq('email', userEmail)
-                .single();
-            user = byEmail.data || null;
-            userError = byEmail.error || null;
-        }
-
-        // Si aún no existe en la tabla de aplicación, devolver 'pendiente' sin órdenes para que el frontend lleve a Lobby
         if (userError && userError.code === 'PGRST116') {
-            logger.warnWithContext('Usuario no encontrado en tabla de aplicación', { userId, userEmail });
+            logger.warnWithContext('Usuario no encontrado en tabla de aplicación', { supaUserId, userEmail });
             return res.status(200).json({ status: 'pendiente', orders: [], group_name: null });
         }
         if (userError) throw userError;
 
-        // Si pendiente, fetch última orden (usando id de app si está disponible)
+        // Si pendiente, fetch última orden usando id de app
         let orders = [];
-        if (user.status === 'pendiente') {
-            const appUserId = user?.id || userId;
+        if (user && user.status === 'pendiente') {
             const { data: orderData, error: orderError } = await supabase
                 .from('payment_orders')
                 .select('id, status')
-                .eq('user_id', appUserId)
+                .eq('user_id', user.id)
                 .order('created_at', { ascending: false })
                 .limit(1);
 
@@ -509,17 +496,17 @@ app.get('/api/me', authenticateToken, async (req, res) => {
             orders = orderData || [];
         }
 
-            logger.infoWithContext('Status del usuario obtenido', { userId, email: userEmail, status: user.status, group_name: user.group_name });
-    res.status(200).json({ 
-      status: user.status,
-            group_name: user.group_name || null,
-            orders  // Array con última orden (o vacío)
-    });
-  } catch (error) {
-        logger.errorWithCode('Error en /api/me (soft-fallback a pendiente)', 'ME_ERR_001', { userId, error: error.message });
+        logger.infoWithContext('Status del usuario obtenido', { supaUserId, email: userEmail, status: user?.status, group_name: user?.group_name });
+        res.status(200).json({
+            status: user?.status || 'pendiente',
+            group_name: user?.group_name || null,
+            orders
+        });
+    } catch (error) {
+        logger.errorWithCode('Error en /api/me (soft-fallback a pendiente)', 'ME_ERR_001', { supaUserId, error: error.message });
         // Fallback amable: devolver "pendiente" para que el frontend redirija a Lobby
         res.status(200).json({ status: 'pendiente', orders: [], group_name: null });
-  }
+    }
 });
 
 // Rutas de prueba
