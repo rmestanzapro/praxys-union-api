@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const { createClient } = require('@supabase/supabase-js');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -13,6 +14,16 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const jwtSecret = process.env.JWT_SECRET;
 const moralisApiKey = process.env.MORALIS_API_KEY; // Añadir a .env
+
+// Validación mínima de variables críticas en producción
+if (!supabaseUrl || !supabaseKey) {
+    console.error('[BOOT] SUPABASE_URL o SUPABASE_KEY no definidos.');
+    process.exit(1);
+}
+if (!jwtSecret) {
+    console.error('[BOOT] JWT_SECRET no definido.');
+    process.exit(1);
+}
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
@@ -55,7 +66,24 @@ const isValidTronAddress = (address) => /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(addre
 const isValidBscAddress = (address) => /^0x[a-fA-F0-9]{40}$/.test(address);
 
 // Middleware
-app.use(cors());
+// Seguridad básica
+app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+
+// CORS: restringe a orígenes definidos en env (FRONTEND_ORIGIN, separados por comas)
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '';
+const allowedOrigins = FRONTEND_ORIGIN
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+app.use(cors({
+    origin: allowedOrigins.length ? allowedOrigins : '*',
+    methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+    allowedHeaders: ['Content-Type','Authorization'],
+}));
+
 app.use(express.json());
 
 // Rate limiting para /register y /login
@@ -468,18 +496,33 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     const supaUserId = req.user.userId;
     const userEmail = req.user.email;
 
-    try {
-        // Buscar SIEMPRE por email para evitar mismatch de tipos (uuid vs bigint)
-        const { data: user, error: userError } = await supabase
+        try {
+            // Buscar SIEMPRE por email para evitar mismatch de tipos (uuid vs bigint)
+            let { data: user, error: userError } = await supabase
             .from('users')
             .select('id, status, group_name')
             .eq('email', userEmail)
             .single();
 
-        if (userError && userError.code === 'PGRST116') {
-            logger.warnWithContext('Usuario no encontrado en tabla de aplicación', { supaUserId, userEmail });
-            return res.status(200).json({ status: 'pendiente', orders: [], group_name: null });
-        }
+            // Si no existe el usuario en la app, crear registro mínimo "pendiente" (lazy creation)
+            if (userError && userError.code === 'PGRST116') {
+                logger.warnWithContext('Usuario no encontrado en tabla de aplicación. Creando registro mínimo (lazy).', { supaUserId, userEmail });
+                const { data: created, error: createErr } = await supabase
+                    .from('users')
+                    .insert({
+                        email: userEmail,
+                        status: 'pendiente',
+                        group_name: null
+                    })
+                    .select('id, status, group_name')
+                    .single();
+                if (createErr) {
+                    logger.errorWithCode('Fallo creando usuario lazy', 'ME_LAZY_CREATE_ERR', { userEmail, error: createErr.message });
+                    return res.status(200).json({ status: 'pendiente', orders: [], group_name: null });
+                }
+                user = created;
+                userError = null;
+            }
         if (userError) throw userError;
 
             // Si pendiente, fetch última orden usando id de app
@@ -515,11 +558,11 @@ app.get('/api/me', authenticateToken, async (req, res) => {
         }
 
         logger.infoWithContext('Status del usuario obtenido', { supaUserId, email: userEmail, status: user?.status, group_name: user?.group_name });
-        res.status(200).json({
-            status: user?.status || 'pendiente',
-            group_name: user?.group_name || null,
-            orders
-        });
+            res.status(200).json({
+                status: user?.status || 'pendiente',
+                group_name: user?.group_name || null,
+                orders
+            });
     } catch (error) {
         logger.errorWithCode('Error en /api/me (soft-fallback a pendiente)', 'ME_ERR_001', { supaUserId, error: error.message });
         // Fallback amable: devolver "pendiente" para que el frontend redirija a Lobby
